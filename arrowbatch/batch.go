@@ -25,7 +25,9 @@ type Batch struct {
 	Seq      uint64
 	Cursor   *rowmodel.CheckpointData
 	Drained  bool
-	Last     rowmodel.Meta
+	// Control is a borrowed, immutable stream marker, independent of Drained.
+	Control *rowmodel.Control
+	Last    rowmodel.Meta
 }
 
 // NewBatch takes ownership of rows and ops. Ops must not be mutated afterward.
@@ -33,6 +35,24 @@ func NewBatch(rows arrow.RecordBatch, ops Operations) *Batch {
 	b := &Batch{rows: rows, ops: ops}
 	b.refs.Store(1)
 	return b
+}
+
+// WithRows returns a new owned batch carrying rows in place of b's, sharing
+// b's operations and metadata. It takes ownership of rows; b is untouched and
+// still needs its own Release. Row count must match so operations stay aligned.
+func (b *Batch) WithRows(rows arrow.RecordBatch) *Batch {
+	out := &Batch{
+		rows:     rows,
+		ops:      b.ops,
+		Resource: b.Resource,
+		Part:     b.Part,
+		Seq:      b.Seq,
+		Cursor:   b.Cursor,
+		Drained:  b.Drained,
+		Last:     b.Last,
+	}
+	out.refs.Store(1)
+	return out
 }
 
 // NewMarker constructs a rowless, owned completion marker.
@@ -95,5 +115,6 @@ func (b *Batch) Release() {
 			b.rows = nil
 		}
 		b.ops = Operations{}
+		b.Control = nil
 	}
 }

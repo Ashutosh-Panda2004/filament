@@ -1,9 +1,17 @@
-import type { ReadMode, ReplicationMode, WriteMode } from "@/gen/ingestion/v1/common_pb";
+import type {
+  ExecutionMode,
+  ReadMode,
+  ReplicationMode,
+  WriteMode,
+} from "@/gen/ingestion/v1/common_pb";
 import type { Connection } from "@/gen/ingestion/v1/connections_pb";
 import type { Resource, ResourceColumn } from "@/gen/ingestion/v1/connectors_pb";
 import type { Pipeline } from "@/gen/ingestion/v1/pipelines_pb";
 
-import type { PipelineSettingsPageScheduleState } from "@/pages/pipelines/settings/types";
+import type { PipelineNodeConfig } from "@/pages/pipelines/components/node/types";
+import type { PipelineNotifier } from "@/pages/pipelines/components/notifier/types";
+import type { PipelineResourceStatus } from "@/pages/pipelines/components/resource/types";
+import type { PipelineScheduleState } from "@/pages/pipelines/components/schedule/types";
 
 export enum CreatePipelineModalStep {
   CONNECTIONS = "CONNECTIONS",
@@ -12,13 +20,9 @@ export enum CreatePipelineModalStep {
   DETAILS = "DETAILS",
 }
 
-export enum CreatePipelineModalStepStatus {
-  COMPLETED = "COMPLETED",
-  CURRENT = "CURRENT",
-  UPCOMING = "UPCOMING",
-}
-
 export interface CreatePipelineModalState {
+  executionMode: ExecutionMode;
+  manualResources: Resource["name"][];
   step: CreatePipelineModalStep;
   activeSinkId: Connection["id"];
   sourceConnection: Connection | null;
@@ -27,17 +31,14 @@ export interface CreatePipelineModalState {
   resourceReadModes: Record<Connection["id"], Record<Resource["name"], ReadMode>>;
   resourceCursors: Record<Connection["id"], Record<Resource["name"], ResourceColumn["name"]>>;
   sinkWriteModes: Record<Connection["id"], WriteMode>;
+  nodeConfigs: Record<Connection["id"], PipelineNodeConfig>;
   name: Pipeline["name"];
   isNameTouched: boolean;
   description: Pipeline["description"];
-  schedule: PipelineSettingsPageScheduleState;
+  schedule: PipelineScheduleState;
+  notifiers: PipelineNotifier[];
   workerConfiguration: string;
   isSubmitting: boolean;
-}
-
-export interface CreatePipelineModalResourceStatus {
-  message: string;
-  isBlocking: boolean;
 }
 
 export interface CreatePipelineModalResourceRow {
@@ -49,7 +50,8 @@ export interface CreatePipelineModalResourceRow {
   readModeOptions: ReadMode[];
   cursorField: ResourceColumn["name"];
   cursorOptions: ResourceColumn[];
-  status?: CreatePipelineModalResourceStatus;
+  managedIncremental: boolean;
+  status?: PipelineResourceStatus;
 }
 
 export interface CreatePipelineModalSinkRow {
@@ -58,11 +60,12 @@ export interface CreatePipelineModalSinkRow {
   writeModeOptions: WriteMode[];
 }
 
-export interface CreatePipelineModalDerivedState {
+interface CreatePipelineModalDerivedState {
+  supportedExecutionModes: ExecutionMode[];
+  hasReadLevers: boolean;
   rowsBySink: Record<Connection["id"], CreatePipelineModalResourceRow[]>;
   sinks: CreatePipelineModalSinkRow[];
   replication: ReplicationMode;
-  isCdc: boolean;
   issuesBySink: Record<Connection["id"], string[]>;
   selectedCountBySink: Record<Connection["id"], number>;
   isLoading: boolean;

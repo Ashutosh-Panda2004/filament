@@ -13,6 +13,7 @@ import (
 	"github.com/galaxy-io/filament/datastore/sqlite"
 	"github.com/galaxy-io/filament/identity"
 	"github.com/galaxy-io/filament/registry"
+	"github.com/galaxy-io/filament/worker"
 )
 
 // leverSource declares the full grid plus CDC and answers replication from
@@ -43,13 +44,6 @@ func (leverSource) Extract(context.Context, filament.RecordSink, filament.Extrac
 	return nil
 }
 
-func (leverSource) Replication(cfg filament.Config) filament.ReplicationMode {
-	if cfg.String("replication") == string(filament.ReplicationCDC) {
-		return filament.ReplicationCDC
-	}
-	return filament.ReplicationStandard
-}
-
 func (leverSource) Discover(context.Context, filament.DiscoverOpts) (filament.DiscoverResult, error) {
 	return filament.DiscoverResult{Resources: []filament.Resource{
 		{Name: "orders", Selectable: true, PrimaryKey: []string{"id"}},
@@ -59,7 +53,11 @@ func (leverSource) Discover(context.Context, filament.DiscoverOpts) (filament.Di
 
 func (leverSource) Schema(_ context.Context, resource string) (filament.RecordSchema, error) {
 	if resource == "orders" {
-		return filament.RecordSchema{Resource: resource, PrimaryKey: []string{"id"}}, nil
+		return filament.RecordSchema{Resource: resource, PrimaryKey: []string{"id"}, Fields: []filament.SchemaField{
+			{Name: "id", Logical: filament.LogicalInt64},
+			{Name: "email", Logical: filament.LogicalString, Nullable: true},
+			{Name: "created_at", Logical: filament.LogicalTimestamp},
+		}}, nil
 	}
 	return filament.RecordSchema{Resource: resource}, nil
 }
@@ -80,7 +78,6 @@ func (leverSink) Spec() filament.SinkSpec {
 	return filament.SinkSpec{
 		Name: "leversink",
 		Capabilities: filament.SinkCapabilities{
-			Upsertable: true,
 			WritePolicies: filament.WriteCapabilities(
 				filament.IngestionFullReplace,
 				filament.IngestionFullUpsert,
@@ -117,7 +114,8 @@ func leverAPI(t *testing.T) (*Server, map[string]string) {
 	sources.Register("leversource", func() filament.Source { return leverSource{} })
 	sinks := registry.NewSinks()
 	sinks.Register("leversink", func() filament.Sink { return leverSink{} })
-	api := New(sources, sinks, sqlite.NewMemory(), nil, nil)
+	sinks.Register("strictsink", func() filament.Sink { return strictSink{} })
+	api := New(worker.Local(sources, sinks), sqlite.NewMemory(), nil, nil)
 
 	create := func(kind ingestionv1.ConnectorKind, name, connector string, config map[string]any) string {
 		var cfg *structpb.Struct
@@ -202,14 +200,18 @@ func TestValidatePipelineLevers(t *testing.T) {
 		return nil
 	}
 
-	t.Run("default edge is Full Replace with independent options", func(t *testing.T) {
+	t.Run("default edge is Full Upsert with keyless append", func(t *testing.T) {
 		resp := validate(ids["standard"], &ingestionv1.PipelineEdge{})
 		if !resp.GetValid() {
 			t.Fatalf("valid = false: %v", resp)
 		}
 		ev := resp.GetEdges()[0]
-		if ev.GetEffectiveReadMode() != ingestionv1.ReadMode_READ_MODE_FULL || ev.GetEffectiveWriteMode() != ingestionv1.WriteMode_WRITE_MODE_REPLACE {
+		if ev.GetEffectiveReadMode() != ingestionv1.ReadMode_READ_MODE_FULL || ev.GetEffectiveWriteMode() != ingestionv1.WriteMode_WRITE_MODE_UPSERT {
 			t.Fatalf("effective modes = %v/%v", ev.GetEffectiveReadMode(), ev.GetEffectiveWriteMode())
+		}
+		requirements := byResource(ev, "audit").GetRequirements()
+		if len(requirements) != 1 || requirements[0].GetBlocking() || !requirements[0].GetSatisfied() {
+			t.Fatalf("keyless append fallback not reported: %v", requirements)
 		}
 		if got := ev.GetSupportedWriteModes(); len(got) != 3 {
 			t.Fatalf("write modes = %v", got)
@@ -246,8 +248,8 @@ func TestValidatePipelineLevers(t *testing.T) {
 				blocking++
 			}
 		}
-		if blocking != 2 {
-			t.Fatalf("audit blocking requirements = %d, want cursor + primary key", blocking)
+		if blocking != 1 {
+			t.Fatalf("audit blocking requirements = %d, want cursor only", blocking)
 		}
 	})
 
@@ -342,7 +344,7 @@ func TestNormalizeEdgeModes(t *testing.T) {
 	if err := api.normalizeEdgeModes(testCtx(), filament.DefaultTenantID, nodes(ids["standard"]), []*ingestionv1.PipelineEdge{edge}); err != nil {
 		t.Fatal(err)
 	}
-	if edge.GetReadMode() != ingestionv1.ReadMode_READ_MODE_FULL || edge.GetWriteMode() != ingestionv1.WriteMode_WRITE_MODE_REPLACE {
+	if edge.GetReadMode() != ingestionv1.ReadMode_READ_MODE_FULL || edge.GetWriteMode() != ingestionv1.WriteMode_WRITE_MODE_UPSERT {
 		t.Fatalf("default modes = %v/%v", edge.GetReadMode(), edge.GetWriteMode())
 	}
 
@@ -380,5 +382,70 @@ func TestNormalizeEdgeModes(t *testing.T) {
 	}
 	if err := api.normalizeEdgeModes(testCtx(), filament.DefaultTenantID, nodes(ids["standard"]), []*ingestionv1.PipelineEdge{edge}); err == nil {
 		t.Fatal("unknown read mode must be rejected")
+	}
+}
+
+// A transform is compiled against the live source schema during validation,
+// with each issue keyed by its definition path.
+func TestValidatePipelineCompilesTransforms(t *testing.T) {
+	api, ids := leverAPI(t)
+	validate := func(steps []any) *ingestionv1.ValidatePipelineResponse {
+		transform, err := structpb.NewStruct(map[string]any{
+			"version":   1,
+			"resources": map[string]any{"orders": map[string]any{"steps": steps}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := api.ValidatePipeline(testCtx(), connect.NewRequest(&ingestionv1.ValidatePipelineRequest{
+			Graph: &ingestionv1.PipelineGraph{
+				Nodes: []*ingestionv1.PipelineNode{
+					{Id: "src", Kind: ingestionv1.ConnectorKind_CONNECTOR_KIND_SOURCE, ConnectionId: ids["standard"]},
+					{Id: "snk", Kind: ingestionv1.ConnectorKind_CONNECTOR_KIND_SINK, ConnectionId: ids["sink"]},
+				},
+				Edges: []*ingestionv1.PipelineEdge{{FromNode: "src", ToNode: "snk", Resource: "orders", Transform: transform}},
+			},
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.Msg
+	}
+
+	if resp := validate([]any{map[string]any{"compute": map[string]any{"shout": map[string]any{"upper": []any{map[string]any{"col": "email"}}}}}}); !resp.GetValid() {
+		t.Fatalf("valid = false: %v", resp.GetEdges()[0].GetErrors())
+	}
+
+	resp := validate([]any{map[string]any{"compute": map[string]any{"shout": map[string]any{"upper": []any{map[string]any{"col": "missing"}}}}}})
+	if resp.GetValid() {
+		t.Fatal("valid = true, want a transform issue")
+	}
+	errs := resp.GetEdges()[0].GetErrors()
+	if len(errs) != 1 || errs[0].GetField() != `resources["orders"].steps[0].compute["shout"].upper[0]` {
+		t.Fatalf("errors = %v", errs)
+	}
+}
+
+type managedLeverSource struct{ leverSource }
+
+func (managedLeverSource) ManagedIncremental(resource string) bool { return resource == "orders" }
+func (managedLeverSource) CursorColumns(context.Context, string) ([]filament.CursorColumn, error) {
+	return nil, nil
+}
+
+func TestManagedIncrementalNeedsNoCursorColumn(t *testing.T) {
+	sources := registry.NewSources()
+	sources.Register("managedlever", func() filament.Source { return managedLeverSource{} })
+	server := &Server{worker: worker.Local(sources, registry.NewSinks())}
+	edge := &ingestionv1.PipelineEdge{FromNode: "src", Resource: "orders"}
+	probes := newNodeInspections(server, []*ingestionv1.PipelineEdge{edge})
+	ev := &ingestionv1.EdgeValidation{}
+	server.resourceBreakdown(context.Background(), edge, &ingestionv1.PipelineNode{Id: "src"}, filament.Connection{Connector: "managedlever"}, leverSink{}.Spec(), filament.IngestionIncrementalUpsert, []ingestionv1.ReadMode{ingestionv1.ReadMode_READ_MODE_FULL, ingestionv1.ReadMode_READ_MODE_INCREMENTAL}, probes, ev)
+	if len(ev.Resources) != 1 {
+		t.Fatal(ev)
+	}
+	resource := ev.Resources[0]
+	if len(resource.SupportedReadModes) != 2 || len(resource.Requirements) != 1 || !resource.Requirements[0].Satisfied || resource.Requirements[0].Blocking || len(resource.Requirements[0].Candidates) != 0 {
+		t.Fatalf("managed state validation = %v", resource)
 	}
 }

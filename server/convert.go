@@ -12,203 +12,6 @@ import (
 	"github.com/galaxy-io/filament/events"
 )
 
-func sourceSpecToProto(spec filament.ConnectorSpec) *ingestionv1.ConnectorSpec {
-	return &ingestionv1.ConnectorSpec{
-		Name:         spec.Name,
-		DisplayName:  spec.DisplayName,
-		Description:  spec.Description,
-		DarkLogoUrl:  spec.DarkLogoURL,
-		LightLogoUrl: spec.LightLogoURL,
-		Kind:         ingestionv1.ConnectorKind_CONNECTOR_KIND_SOURCE,
-		Version:      spec.Version,
-		Maturity:     connectorMaturityToProto(spec.Maturity),
-		Modes:        modesToProto(spec.Modes),
-		ConfigSchema: configSchemaToProto(spec.Config),
-	}
-}
-
-func connectorMaturityToProto(maturity filament.ConnectorMaturity) ingestionv1.ConnectorMaturity {
-	switch maturity {
-	case filament.MaturityAlpha:
-		return ingestionv1.ConnectorMaturity_CONNECTOR_MATURITY_ALPHA
-	case filament.MaturityBeta:
-		return ingestionv1.ConnectorMaturity_CONNECTOR_MATURITY_BETA
-	case filament.MaturityStable:
-		return ingestionv1.ConnectorMaturity_CONNECTOR_MATURITY_STABLE
-	default:
-		return ingestionv1.ConnectorMaturity_CONNECTOR_MATURITY_UNSPECIFIED
-	}
-}
-
-func sinkSpecToProto(spec filament.SinkSpec) *ingestionv1.ConnectorSpec {
-	return &ingestionv1.ConnectorSpec{
-		Name:         spec.Name,
-		DisplayName:  spec.DisplayName,
-		Description:  spec.Description,
-		DarkLogoUrl:  spec.DarkLogoURL,
-		LightLogoUrl: spec.LightLogoURL,
-		Kind:         ingestionv1.ConnectorKind_CONNECTOR_KIND_SINK,
-		Version:      spec.Version,
-		Maturity:     connectorMaturityToProto(spec.Maturity),
-		ConfigSchema: configSchemaToProto(spec.Config),
-		SchemaField:  spec.SchemaField,
-	}
-}
-
-func configSchemaToProto(schema filament.ConfigSchema) *ingestionv1.ConfigSchema {
-	return &ingestionv1.ConfigSchema{Fields: configFieldsToProto(schema.Fields)}
-}
-
-func configFieldsToProto(configFields []filament.ConfigField) []*ingestionv1.ConfigField {
-	fields := make([]*ingestionv1.ConfigField, 0, len(configFields))
-	for _, field := range configFields {
-		fields = append(fields, &ingestionv1.ConfigField{
-			Name:        field.Name,
-			Type:        fieldTypeToProto(field.Type),
-			Required:    field.Required,
-			Default:     valueToProto(field.Default),
-			Enum:        enumOptionsToProto(field.Enum),
-			Help:        field.Help,
-			Scope:       fieldScopeToProto(field.Scope),
-			Secret:      field.Secret || field.Type == filament.FieldSecret,
-			Fields:      configFieldsToProto(field.Fields),
-			VisibleWhen: fieldConditionToProto(field.VisibleWhen),
-		})
-	}
-	return fields
-}
-
-func enumOptionsToProto(options []filament.EnumOption) []*ingestionv1.EnumOption {
-	out := make([]*ingestionv1.EnumOption, 0, len(options))
-	for _, option := range options {
-		out = append(out, &ingestionv1.EnumOption{
-			Value: option.Value,
-			Label: option.Label,
-		})
-	}
-	return out
-}
-
-func fieldConditionToProto(condition *filament.FieldCondition) *ingestionv1.FieldCondition {
-	if condition == nil {
-		return nil
-	}
-	return &ingestionv1.FieldCondition{
-		Field:  condition.Field,
-		Values: condition.Values,
-	}
-}
-
-// modesToProto reduces the engine's read mechanisms to the connection-level
-// replication modes a connector supports.
-func modesToProto(modes []filament.ReadMode) []ingestionv1.ReplicationMode {
-	var standard, cdc bool
-	for _, mode := range modes {
-		if mode == filament.ModeCDC {
-			cdc = true
-		} else {
-			standard = true
-		}
-	}
-	var out []ingestionv1.ReplicationMode
-	if standard {
-		out = append(out, ingestionv1.ReplicationMode_REPLICATION_MODE_STANDARD)
-	}
-	if cdc {
-		out = append(out, ingestionv1.ReplicationMode_REPLICATION_MODE_CDC)
-	}
-	return out
-}
-
-func replicationToProto(mode filament.ReplicationMode) ingestionv1.ReplicationMode {
-	if mode == filament.ReplicationCDC {
-		return ingestionv1.ReplicationMode_REPLICATION_MODE_CDC
-	}
-	return ingestionv1.ReplicationMode_REPLICATION_MODE_STANDARD
-}
-
-func readModeFromProto(mode ingestionv1.ReadMode) (filament.ReadMode, error) {
-	switch mode {
-	case ingestionv1.ReadMode_READ_MODE_UNSPECIFIED, ingestionv1.ReadMode_READ_MODE_FULL:
-		return filament.ModeFull, nil
-	case ingestionv1.ReadMode_READ_MODE_INCREMENTAL:
-		return filament.ModeIncremental, nil
-	default:
-		return 0, fmt.Errorf("unknown read mode %d", mode)
-	}
-}
-
-func readModeToProto(mode filament.ReadMode) ingestionv1.ReadMode {
-	switch mode {
-	case filament.ModeIncremental:
-		return ingestionv1.ReadMode_READ_MODE_INCREMENTAL
-	default:
-		return ingestionv1.ReadMode_READ_MODE_FULL
-	}
-}
-
-func writeModeFromProto(mode ingestionv1.WriteMode) (filament.WriteMode, error) {
-	switch mode {
-	case ingestionv1.WriteMode_WRITE_MODE_UNSPECIFIED, ingestionv1.WriteMode_WRITE_MODE_REPLACE:
-		return filament.WriteReplace, nil
-	case ingestionv1.WriteMode_WRITE_MODE_APPEND:
-		return filament.WriteAppend, nil
-	case ingestionv1.WriteMode_WRITE_MODE_UPSERT:
-		return filament.WriteUpsert, nil
-	case ingestionv1.WriteMode_WRITE_MODE_MERGE:
-		return filament.WriteMerge, nil
-	default:
-		return "", fmt.Errorf("unknown write mode %d", mode)
-	}
-}
-
-func writeModeToProto(mode filament.WriteMode) ingestionv1.WriteMode {
-	switch mode {
-	case filament.WriteAppend:
-		return ingestionv1.WriteMode_WRITE_MODE_APPEND
-	case filament.WriteUpsert:
-		return ingestionv1.WriteMode_WRITE_MODE_UPSERT
-	case filament.WriteMerge:
-		return ingestionv1.WriteMode_WRITE_MODE_MERGE
-	default:
-		return ingestionv1.WriteMode_WRITE_MODE_REPLACE
-	}
-}
-
-func fieldTypeToProto(t filament.FieldType) ingestionv1.FieldType {
-	switch t {
-	case filament.FieldString:
-		return ingestionv1.FieldType_FIELD_TYPE_STRING
-	case filament.FieldInt:
-		return ingestionv1.FieldType_FIELD_TYPE_INT
-	case filament.FieldBool:
-		return ingestionv1.FieldType_FIELD_TYPE_BOOL
-	case filament.FieldSecret:
-		return ingestionv1.FieldType_FIELD_TYPE_SECRET
-	case filament.FieldDuration:
-		return ingestionv1.FieldType_FIELD_TYPE_DURATION
-	case filament.FieldEnum:
-		return ingestionv1.FieldType_FIELD_TYPE_ENUM
-	case filament.FieldObject:
-		return ingestionv1.FieldType_FIELD_TYPE_OBJECT
-	case filament.FieldList:
-		return ingestionv1.FieldType_FIELD_TYPE_LIST
-	default:
-		return ingestionv1.FieldType_FIELD_TYPE_UNSPECIFIED
-	}
-}
-
-func fieldScopeToProto(s filament.FieldScope) ingestionv1.FieldScope {
-	switch s {
-	case filament.ScopeConnection:
-		return ingestionv1.FieldScope_FIELD_SCOPE_CONNECTION
-	case filament.ScopePipeline:
-		return ingestionv1.FieldScope_FIELD_SCOPE_PIPELINE
-	default:
-		return ingestionv1.FieldScope_FIELD_SCOPE_UNSPECIFIED
-	}
-}
-
 func runStatusToProto(status filament.RunStatus) ingestionv1.RunStatus {
 	switch status {
 	case filament.RunRequested:
@@ -268,21 +71,6 @@ func runSignalFromProto(signal ingestionv1.RunSignal) (filament.Signal, error) {
 	default:
 		return 0, fmt.Errorf("signal is required")
 	}
-}
-
-func resourcesToProto(resources []filament.Resource) *ingestionv1.DiscoverResourcesResponse {
-	out := make([]*ingestionv1.Resource, 0, len(resources))
-	for _, resource := range resources {
-		out = append(out, &ingestionv1.Resource{
-			Name:         resource.Name,
-			IsSelectable: resource.Selectable,
-			PrimaryKey:   resource.PrimaryKey,
-			Selector:     resource.Selector,
-			DisplayName:  resource.DisplayName,
-			Metadata:     resource.Metadata,
-		})
-	}
-	return &ingestionv1.DiscoverResourcesResponse{Resources: out}
 }
 
 // epochMillis renders a stamp for the wire, where 0 means unset.
@@ -368,6 +156,8 @@ func eventFieldsToProto(data any) *ingestionv1.RunEventFields {
 		fields.Checkpoint = checkpointToProto(d.Checkpoint)
 	case events.RateLimitedEvent:
 		fields.RetryAfterMs = d.RetryAfter.Milliseconds()
+	case events.StreamAttemptEndedEvent:
+		fields.Error = d.Error
 	case events.RetryExhaustedEvent:
 		fields.Error = d.Error
 	}
@@ -392,9 +182,24 @@ func tailResponse(ev *ingestionv1.RunEvent) *ingestionv1.TailRunResponse {
 	return &ingestionv1.TailRunResponse{Event: ev}
 }
 
+// snapshotTime uses a known lifecycle stamp. Resource snapshots have no separate
+// timestamp, so their time reflects the containing run snapshot.
+func snapshotTime(state filament.RunState) int64 {
+	if state.EndedAt != nil && !state.EndedAt.IsZero() {
+		return state.EndedAt.UnixMilli()
+	}
+	for _, at := range []time.Time{state.UpdatedAt, state.StartedAt, state.RequestedAt, state.CreatedAt} {
+		if !at.IsZero() {
+			return at.UnixMilli()
+		}
+	}
+	return time.Now().UnixMilli()
+}
+
 func runSnapshotEvent(state filament.RunState, replay bool) *ingestionv1.RunEvent {
 	return &ingestionv1.RunEvent{
 		EventType: runEventType(state.Status),
+		CreatedAt: snapshotTime(state),
 		TenantId:  string(state.Tenant),
 		RunId:     string(state.Run),
 		Fields: &ingestionv1.RunEventFields{
@@ -457,24 +262,6 @@ func runStatusEventType(status filament.RunStatus) string {
 	}
 }
 
-func structMap(s *structpb.Struct) map[string]any {
-	if s == nil {
-		return map[string]any{}
-	}
-	return s.AsMap()
-}
-
-func valueToProto(v any) *structpb.Value {
-	if v == nil {
-		return nil
-	}
-	value, err := structpb.NewValue(v)
-	if err != nil {
-		return nil
-	}
-	return value
-}
-
 func validationError(message string) *ingestionv1.ValidateConfigResponse {
 	return &ingestionv1.ValidateConfigResponse{
 		Valid: false,
@@ -504,8 +291,17 @@ func requiredConfigFieldError(path string) error {
 }
 
 func validateConfigSchema(schema filament.ConfigSchema, cfg filament.Config) error {
+	return validateConfigScope(schema, cfg, filament.ScopeConnection)
+}
+
+// validateConfigScope checks the fields of one scope. A pipeline-scoped field
+// with a default is filled at run time, so its absence is never an error.
+func validateConfigScope(schema filament.ConfigSchema, cfg filament.Config, scope filament.FieldScope) error {
 	for _, field := range schema.Fields {
-		if field.Scope != filament.ScopeConnection {
+		if field.Scope != scope {
+			continue
+		}
+		if scope == filament.ScopePipeline && field.Default != nil && !cfg.Has(field.Name) {
 			continue
 		}
 		if err := validateConfigField(field, cfg, field.Name); err != nil {
@@ -584,6 +380,13 @@ func runOptionsFromProto(o *ingestionv1.RunOptions) filament.RunOptions {
 		BatchMaxBytes:       o.GetBatchMaxBytes(),
 		SnapshotParallelism: int(o.GetSnapshotParallelism()),
 		CheckpointEvery:     int(o.GetCheckpointEvery()),
+	}
+	// Callers validate the wire enum before conversion.
+	switch o.GetExecutionMode() {
+	case ingestionv1.ExecutionMode_EXECUTION_MODE_BOUNDED:
+		opts.Execution = filament.ExecutionBounded
+	case ingestionv1.ExecutionMode_EXECUTION_MODE_CONTINUOUS:
+		opts.Execution = filament.ExecutionContinuous
 	}
 	if rl := o.GetRateLimit(); rl != nil {
 		opts.RateLimit = &filament.RatePolicy{

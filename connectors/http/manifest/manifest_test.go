@@ -1,9 +1,94 @@
 package manifest
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
+
+func TestEmptyResponseValidation(t *testing.T) {
+	const base = `
+version: 1
+name: empty
+display_name: Empty
+description: Empty response fixture.
+dark_logo_url: https://example.com/dark.svg
+light_logo_url: https://example.com/light.svg
+connection:
+  base_url: https://example.com
+resources:
+  - name: items
+    path: /items
+    response:
+      empty: %s
+  - name: other
+    path: /other
+`
+	for _, tc := range []struct {
+		rule  string
+		valid bool
+	}{
+		{`{status: 404, body_path: errors, body_equals: [No results]}`, true},
+		{`{status: 404}`, false},
+		{`{body_path: errors, body_equals: [No results]}`, false},
+		{`{status: 404, body_path: "", body_equals: [No results]}`, false},
+		{`{status: 404, body_path: errors, body_equals: []}`, false},
+		{`{status: 404, body_path: errors, body_equals: [""]}`, false},
+		{`{status: 404, body_path: errors, body_equals: No results}`, false},
+		{`{status: 404, body_path: errors, body_equals: [123]}`, false},
+		{`{status: 200, body_path: errors, body_equals: [No results]}`, false},
+		{`{status: 500, body_path: errors, body_equals: [No results]}`, false},
+		{`{status: 404, body_path: errors, body_equals: [No results], typo: true}`, false},
+	} {
+		t.Run(tc.rule, func(t *testing.T) {
+			m, err := Parse([]byte(strings.Replace(base, "%s", tc.rule, 1)))
+			if (err == nil) != tc.valid {
+				t.Fatalf("error=%v, valid=%v", err, tc.valid)
+			}
+			if err == nil && (m.Resources[0].Response.Empty == nil || m.Resources[1].Response.Empty != nil) {
+				t.Fatal("empty response rule was lost or inherited by another resource")
+			}
+		})
+	}
+	defaults := "defaults:\n  response:\n    empty: {status: 404, body_path: errors, body_equals: [No results]}\n"
+	data := strings.Replace(base, "resources:", defaults+"resources:", 1)
+	data = strings.Replace(data, "%s", "{status: 404, body_path: errors, body_equals: [No results]}", 1)
+	if _, err := Parse([]byte(data)); err == nil || !strings.Contains(err.Error(), "individual resources") {
+		t.Fatalf("empty rule in defaults: %v", err)
+	}
+}
+
+func TestPendingResponsePollingDefaultsCanBeOverridden(t *testing.T) {
+	m, err := Parse([]byte(`
+version: 1
+name: async
+display_name: Async
+description: Asynchronous response test.
+dark_logo_url: https://example.com/dark.svg
+light_logo_url: https://example.com/light.svg
+connection:
+  base_url: https://example.com
+defaults:
+  response:
+    poll_pending: true
+resources:
+  - name: computed
+    path: /computed
+  - name: immediate
+    path: /immediate
+    response:
+      poll_pending: false
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Resources[0].Response.PollPending == nil || !*m.Resources[0].Response.PollPending {
+		t.Fatal("pending-response polling default was not inherited")
+	}
+	if m.Resources[1].Response.PollPending == nil || *m.Resources[1].Response.PollPending {
+		t.Fatal("explicit false did not disable inherited polling")
+	}
+}
 
 func TestParseCatalogMetadata(t *testing.T) {
 	m, err := Parse([]byte(`
@@ -13,6 +98,7 @@ display_name: Example API
 description: Example connector used to verify manifest-owned catalog metadata.
 dark_logo_url: https://cdn.example.com/example-dark.svg
 light_logo_url: https://cdn.example.com/example-light.svg
+api_version: "2024-01-01"
 connection:
   base_url: https://example.com
 resources:
@@ -22,7 +108,8 @@ resources:
 	if err != nil {
 		t.Fatalf("parse manifest metadata: %v", err)
 	}
-	if m.DisplayName != "Example API" ||
+	if m.APIVersion != "2024-01-01" ||
+		m.DisplayName != "Example API" ||
 		m.Description != "Example connector used to verify manifest-owned catalog metadata." ||
 		m.DarkLogoURL != "https://cdn.example.com/example-dark.svg" ||
 		m.LightLogoURL != "https://cdn.example.com/example-light.svg" {
@@ -401,5 +488,116 @@ resources:
 `))
 	if err == nil {
 		t.Fatal("former v3 manifest parsed; v1 is the only supported contract")
+	}
+}
+
+func TestRateLimitResponseValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name, rule string
+		valid      bool
+	}{
+		{"complete", `{status: 403, header: Budget, header_value: '0', body_path: error.detail, body_contains: exhausted, backoff_seconds: 90}`, true},
+		{"missing status", `{header: Budget}`, false},
+		{"header value without header", `{status: 403, header_value: '0'}`, false},
+		{"body path without condition", `{status: 403, body_path: error.detail}`, false},
+		{"body condition without path", `{status: 403, body_contains: exhausted}`, false},
+		{"empty body condition", `{status: 403, body_path: error.detail, body_contains: ''}`, false},
+		{"negative backoff", `{status: 403, backoff_seconds: -1}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse([]byte(`
+version: 1
+name: test
+display_name: Test
+description: Rate limit configuration test.
+dark_logo_url: https://example.com/dark.svg
+light_logo_url: https://example.com/light.svg
+connection:
+  base_url: https://example.com
+  rate_limit:
+    responses:
+      - ` + tc.rule + `
+resources:
+  - name: items
+    path: /items
+`))
+			if (err == nil) != tc.valid {
+				t.Fatalf("valid=%v, error=%v", tc.valid, err)
+			}
+		})
+	}
+}
+
+func TestStaticDiscoveryRejectsInvalidDefaults(t *testing.T) {
+	for _, tc := range []struct{ name, discovery, want string }{
+		{"unknown", "mode: static\n  default_resources: [missing]", "unknown resource"},
+		{"hidden", "mode: static\n  default_resources: [hidden]", "capture_only"},
+		{"excluded", "mode: static\n  include: [one]\n  default_resources: [two]", "not in discovery.include"},
+		{"dynamic", "mode: dynamic\n  default_resources: []", "only supported in static mode"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse([]byte(`version: 1
+name: test
+display_name: Test
+description: Static selection validation.
+dark_logo_url: https://example.com/dark.svg
+light_logo_url: https://example.com/light.svg
+connection:
+  base_url: https://example.com
+resources:
+  - name: one
+    path: /one
+  - name: two
+    path: /two
+  - name: hidden
+    path: /hidden
+    capture_only: true
+    capture: { id: id }
+discovery:
+  ` + tc.discovery))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error=%v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseRequiresAPIVersionToMatchPinnedHeader(t *testing.T) {
+	base := `
+version: 1
+name: example
+display_name: Example
+description: Example.
+dark_logo_url: https://cdn.example.com/example-dark.svg
+light_logo_url: https://cdn.example.com/example-light.svg
+%s
+connection:
+  base_url: https://example.com
+  headers:
+    Stripe-Version: "2026-07-29.dahlia"
+resources:
+  - name: records
+    path: /records
+`
+	for name, tc := range map[string]struct {
+		decl    string
+		wantErr string
+	}{
+		"missing":  {"", "api_version: is required when Stripe-Version is pinned"},
+		"mismatch": {`api_version: "2025-01-01"`, `api_version: "2025-01-01" does not match Stripe-Version "2026-07-29.dahlia"`},
+		"match":    {`api_version: "2026-07-29.dahlia"`, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Parse([]byte(fmt.Sprintf(base, tc.decl)))
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("parse: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v, want %q", err, tc.wantErr)
+			}
+		})
 	}
 }

@@ -193,6 +193,57 @@ func (ReplicationMode) EnumDescriptor() ([]byte, []int) {
 	return file_ingestion_v1_common_proto_rawDescGZIP(), []int{2}
 }
 
+// ExecutionMode is independent of replication and write semantics.
+// Unspecified preserves bounded execution for existing clients.
+type ExecutionMode int32
+
+const (
+	ExecutionMode_EXECUTION_MODE_UNSPECIFIED ExecutionMode = 0
+	ExecutionMode_EXECUTION_MODE_BOUNDED     ExecutionMode = 1
+	ExecutionMode_EXECUTION_MODE_CONTINUOUS  ExecutionMode = 2
+)
+
+// Enum value maps for ExecutionMode.
+var (
+	ExecutionMode_name = map[int32]string{
+		0: "EXECUTION_MODE_UNSPECIFIED",
+		1: "EXECUTION_MODE_BOUNDED",
+		2: "EXECUTION_MODE_CONTINUOUS",
+	}
+	ExecutionMode_value = map[string]int32{
+		"EXECUTION_MODE_UNSPECIFIED": 0,
+		"EXECUTION_MODE_BOUNDED":     1,
+		"EXECUTION_MODE_CONTINUOUS":  2,
+	}
+)
+
+func (x ExecutionMode) Enum() *ExecutionMode {
+	p := new(ExecutionMode)
+	*p = x
+	return p
+}
+
+func (x ExecutionMode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ExecutionMode) Descriptor() protoreflect.EnumDescriptor {
+	return file_ingestion_v1_common_proto_enumTypes[3].Descriptor()
+}
+
+func (ExecutionMode) Type() protoreflect.EnumType {
+	return &file_ingestion_v1_common_proto_enumTypes[3]
+}
+
+func (x ExecutionMode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ExecutionMode.Descriptor instead.
+func (ExecutionMode) EnumDescriptor() ([]byte, []int) {
+	return file_ingestion_v1_common_proto_rawDescGZIP(), []int{3}
+}
+
 // ReadMode is the per-resource read lever on Standard connections.
 type ReadMode int32
 
@@ -200,6 +251,7 @@ const (
 	ReadMode_READ_MODE_UNSPECIFIED ReadMode = 0
 	ReadMode_READ_MODE_FULL        ReadMode = 1
 	ReadMode_READ_MODE_INCREMENTAL ReadMode = 2
+	ReadMode_READ_MODE_CDC         ReadMode = 3
 )
 
 // Enum value maps for ReadMode.
@@ -208,11 +260,13 @@ var (
 		0: "READ_MODE_UNSPECIFIED",
 		1: "READ_MODE_FULL",
 		2: "READ_MODE_INCREMENTAL",
+		3: "READ_MODE_CDC",
 	}
 	ReadMode_value = map[string]int32{
 		"READ_MODE_UNSPECIFIED": 0,
 		"READ_MODE_FULL":        1,
 		"READ_MODE_INCREMENTAL": 2,
+		"READ_MODE_CDC":         3,
 	}
 )
 
@@ -227,11 +281,11 @@ func (x ReadMode) String() string {
 }
 
 func (ReadMode) Descriptor() protoreflect.EnumDescriptor {
-	return file_ingestion_v1_common_proto_enumTypes[3].Descriptor()
+	return file_ingestion_v1_common_proto_enumTypes[4].Descriptor()
 }
 
 func (ReadMode) Type() protoreflect.EnumType {
-	return &file_ingestion_v1_common_proto_enumTypes[3]
+	return &file_ingestion_v1_common_proto_enumTypes[4]
 }
 
 func (x ReadMode) Number() protoreflect.EnumNumber {
@@ -240,7 +294,7 @@ func (x ReadMode) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ReadMode.Descriptor instead.
 func (ReadMode) EnumDescriptor() ([]byte, []int) {
-	return file_ingestion_v1_common_proto_rawDescGZIP(), []int{3}
+	return file_ingestion_v1_common_proto_rawDescGZIP(), []int{4}
 }
 
 // WriteMode is the destination-route write lever. Delete remains an internal
@@ -253,6 +307,7 @@ const (
 	WriteMode_WRITE_MODE_REPLACE     WriteMode = 2
 	WriteMode_WRITE_MODE_UPSERT      WriteMode = 3
 	WriteMode_WRITE_MODE_MERGE       WriteMode = 4
+	WriteMode_WRITE_MODE_DELETE      WriteMode = 5
 )
 
 // Enum value maps for WriteMode.
@@ -263,6 +318,7 @@ var (
 		2: "WRITE_MODE_REPLACE",
 		3: "WRITE_MODE_UPSERT",
 		4: "WRITE_MODE_MERGE",
+		5: "WRITE_MODE_DELETE",
 	}
 	WriteMode_value = map[string]int32{
 		"WRITE_MODE_UNSPECIFIED": 0,
@@ -270,6 +326,7 @@ var (
 		"WRITE_MODE_REPLACE":     2,
 		"WRITE_MODE_UPSERT":      3,
 		"WRITE_MODE_MERGE":       4,
+		"WRITE_MODE_DELETE":      5,
 	}
 )
 
@@ -284,11 +341,11 @@ func (x WriteMode) String() string {
 }
 
 func (WriteMode) Descriptor() protoreflect.EnumDescriptor {
-	return file_ingestion_v1_common_proto_enumTypes[4].Descriptor()
+	return file_ingestion_v1_common_proto_enumTypes[5].Descriptor()
 }
 
 func (WriteMode) Type() protoreflect.EnumType {
-	return &file_ingestion_v1_common_proto_enumTypes[4]
+	return &file_ingestion_v1_common_proto_enumTypes[5]
 }
 
 func (x WriteMode) Number() protoreflect.EnumNumber {
@@ -297,7 +354,7 @@ func (x WriteMode) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use WriteMode.Descriptor instead.
 func (WriteMode) EnumDescriptor() ([]byte, []int) {
-	return file_ingestion_v1_common_proto_rawDescGZIP(), []int{4}
+	return file_ingestion_v1_common_proto_rawDescGZIP(), []int{5}
 }
 
 type FieldScope int32
@@ -333,11 +390,11 @@ func (x FieldScope) String() string {
 }
 
 func (FieldScope) Descriptor() protoreflect.EnumDescriptor {
-	return file_ingestion_v1_common_proto_enumTypes[5].Descriptor()
+	return file_ingestion_v1_common_proto_enumTypes[6].Descriptor()
 }
 
 func (FieldScope) Type() protoreflect.EnumType {
-	return &file_ingestion_v1_common_proto_enumTypes[5]
+	return &file_ingestion_v1_common_proto_enumTypes[6]
 }
 
 func (x FieldScope) Number() protoreflect.EnumNumber {
@@ -346,7 +403,7 @@ func (x FieldScope) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use FieldScope.Descriptor instead.
 func (FieldScope) EnumDescriptor() ([]byte, []int) {
-	return file_ingestion_v1_common_proto_rawDescGZIP(), []int{5}
+	return file_ingestion_v1_common_proto_rawDescGZIP(), []int{6}
 }
 
 // WorkerResources sizes the worker that executes a run, shaped like a Kubernetes
@@ -875,17 +932,23 @@ const file_ingestion_v1_common_proto_rawDesc = "" +
 	"\x0fReplicationMode\x12 \n" +
 	"\x1cREPLICATION_MODE_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19REPLICATION_MODE_STANDARD\x10\x01\x12\x18\n" +
-	"\x14REPLICATION_MODE_CDC\x10\x02*T\n" +
+	"\x14REPLICATION_MODE_CDC\x10\x02*j\n" +
+	"\rExecutionMode\x12\x1e\n" +
+	"\x1aEXECUTION_MODE_UNSPECIFIED\x10\x00\x12\x1a\n" +
+	"\x16EXECUTION_MODE_BOUNDED\x10\x01\x12\x1d\n" +
+	"\x19EXECUTION_MODE_CONTINUOUS\x10\x02*g\n" +
 	"\bReadMode\x12\x19\n" +
 	"\x15READ_MODE_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eREAD_MODE_FULL\x10\x01\x12\x19\n" +
-	"\x15READ_MODE_INCREMENTAL\x10\x02*\x83\x01\n" +
+	"\x15READ_MODE_INCREMENTAL\x10\x02\x12\x11\n" +
+	"\rREAD_MODE_CDC\x10\x03*\x9a\x01\n" +
 	"\tWriteMode\x12\x1a\n" +
 	"\x16WRITE_MODE_UNSPECIFIED\x10\x00\x12\x15\n" +
 	"\x11WRITE_MODE_APPEND\x10\x01\x12\x16\n" +
 	"\x12WRITE_MODE_REPLACE\x10\x02\x12\x15\n" +
 	"\x11WRITE_MODE_UPSERT\x10\x03\x12\x14\n" +
-	"\x10WRITE_MODE_MERGE\x10\x04*_\n" +
+	"\x10WRITE_MODE_MERGE\x10\x04\x12\x15\n" +
+	"\x11WRITE_MODE_DELETE\x10\x05*_\n" +
 	"\n" +
 	"FieldScope\x12\x1b\n" +
 	"\x17FIELD_SCOPE_UNSPECIFIED\x10\x00\x12\x1a\n" +
@@ -905,40 +968,41 @@ func file_ingestion_v1_common_proto_rawDescGZIP() []byte {
 	return file_ingestion_v1_common_proto_rawDescData
 }
 
-var file_ingestion_v1_common_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
+var file_ingestion_v1_common_proto_enumTypes = make([]protoimpl.EnumInfo, 7)
 var file_ingestion_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_ingestion_v1_common_proto_goTypes = []any{
 	(ConnectorKind)(0),          // 0: ingestion.v1.ConnectorKind
 	(FieldType)(0),              // 1: ingestion.v1.FieldType
 	(ReplicationMode)(0),        // 2: ingestion.v1.ReplicationMode
-	(ReadMode)(0),               // 3: ingestion.v1.ReadMode
-	(WriteMode)(0),              // 4: ingestion.v1.WriteMode
-	(FieldScope)(0),             // 5: ingestion.v1.FieldScope
-	(*WorkerResources)(nil),     // 6: ingestion.v1.WorkerResources
-	(*WorkerToleration)(nil),    // 7: ingestion.v1.WorkerToleration
-	(*WorkerConfiguration)(nil), // 8: ingestion.v1.WorkerConfiguration
-	(*ConfigField)(nil),         // 9: ingestion.v1.ConfigField
-	(*EnumOption)(nil),          // 10: ingestion.v1.EnumOption
-	(*FieldCondition)(nil),      // 11: ingestion.v1.FieldCondition
-	(*ConfigSchema)(nil),        // 12: ingestion.v1.ConfigSchema
-	nil,                         // 13: ingestion.v1.WorkerResources.RequestsEntry
-	nil,                         // 14: ingestion.v1.WorkerResources.LimitsEntry
-	nil,                         // 15: ingestion.v1.WorkerConfiguration.NodeSelectorEntry
-	(*structpb.Value)(nil),      // 16: google.protobuf.Value
+	(ExecutionMode)(0),          // 3: ingestion.v1.ExecutionMode
+	(ReadMode)(0),               // 4: ingestion.v1.ReadMode
+	(WriteMode)(0),              // 5: ingestion.v1.WriteMode
+	(FieldScope)(0),             // 6: ingestion.v1.FieldScope
+	(*WorkerResources)(nil),     // 7: ingestion.v1.WorkerResources
+	(*WorkerToleration)(nil),    // 8: ingestion.v1.WorkerToleration
+	(*WorkerConfiguration)(nil), // 9: ingestion.v1.WorkerConfiguration
+	(*ConfigField)(nil),         // 10: ingestion.v1.ConfigField
+	(*EnumOption)(nil),          // 11: ingestion.v1.EnumOption
+	(*FieldCondition)(nil),      // 12: ingestion.v1.FieldCondition
+	(*ConfigSchema)(nil),        // 13: ingestion.v1.ConfigSchema
+	nil,                         // 14: ingestion.v1.WorkerResources.RequestsEntry
+	nil,                         // 15: ingestion.v1.WorkerResources.LimitsEntry
+	nil,                         // 16: ingestion.v1.WorkerConfiguration.NodeSelectorEntry
+	(*structpb.Value)(nil),      // 17: google.protobuf.Value
 }
 var file_ingestion_v1_common_proto_depIdxs = []int32{
-	13, // 0: ingestion.v1.WorkerResources.requests:type_name -> ingestion.v1.WorkerResources.RequestsEntry
-	14, // 1: ingestion.v1.WorkerResources.limits:type_name -> ingestion.v1.WorkerResources.LimitsEntry
-	6,  // 2: ingestion.v1.WorkerConfiguration.resources:type_name -> ingestion.v1.WorkerResources
-	15, // 3: ingestion.v1.WorkerConfiguration.node_selector:type_name -> ingestion.v1.WorkerConfiguration.NodeSelectorEntry
-	7,  // 4: ingestion.v1.WorkerConfiguration.tolerations:type_name -> ingestion.v1.WorkerToleration
+	14, // 0: ingestion.v1.WorkerResources.requests:type_name -> ingestion.v1.WorkerResources.RequestsEntry
+	15, // 1: ingestion.v1.WorkerResources.limits:type_name -> ingestion.v1.WorkerResources.LimitsEntry
+	7,  // 2: ingestion.v1.WorkerConfiguration.resources:type_name -> ingestion.v1.WorkerResources
+	16, // 3: ingestion.v1.WorkerConfiguration.node_selector:type_name -> ingestion.v1.WorkerConfiguration.NodeSelectorEntry
+	8,  // 4: ingestion.v1.WorkerConfiguration.tolerations:type_name -> ingestion.v1.WorkerToleration
 	1,  // 5: ingestion.v1.ConfigField.type:type_name -> ingestion.v1.FieldType
-	16, // 6: ingestion.v1.ConfigField.default:type_name -> google.protobuf.Value
-	10, // 7: ingestion.v1.ConfigField.enum:type_name -> ingestion.v1.EnumOption
-	5,  // 8: ingestion.v1.ConfigField.scope:type_name -> ingestion.v1.FieldScope
-	9,  // 9: ingestion.v1.ConfigField.fields:type_name -> ingestion.v1.ConfigField
-	11, // 10: ingestion.v1.ConfigField.visible_when:type_name -> ingestion.v1.FieldCondition
-	9,  // 11: ingestion.v1.ConfigSchema.fields:type_name -> ingestion.v1.ConfigField
+	17, // 6: ingestion.v1.ConfigField.default:type_name -> google.protobuf.Value
+	11, // 7: ingestion.v1.ConfigField.enum:type_name -> ingestion.v1.EnumOption
+	6,  // 8: ingestion.v1.ConfigField.scope:type_name -> ingestion.v1.FieldScope
+	10, // 9: ingestion.v1.ConfigField.fields:type_name -> ingestion.v1.ConfigField
+	12, // 10: ingestion.v1.ConfigField.visible_when:type_name -> ingestion.v1.FieldCondition
+	10, // 11: ingestion.v1.ConfigSchema.fields:type_name -> ingestion.v1.ConfigField
 	12, // [12:12] is the sub-list for method output_type
 	12, // [12:12] is the sub-list for method input_type
 	12, // [12:12] is the sub-list for extension type_name
@@ -956,7 +1020,7 @@ func file_ingestion_v1_common_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ingestion_v1_common_proto_rawDesc), len(file_ingestion_v1_common_proto_rawDesc)),
-			NumEnums:      6,
+			NumEnums:      7,
 			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   0,

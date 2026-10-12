@@ -1,23 +1,33 @@
-import type { ReadMode, WriteMode } from "@/gen/ingestion/v1/common_pb";
+import type { ExecutionMode, ReadMode, WriteMode } from "@/gen/ingestion/v1/common_pb";
 import type { Connection } from "@/gen/ingestion/v1/connections_pb";
 import type { Resource, ResourceColumn } from "@/gen/ingestion/v1/connectors_pb";
 import type { Pipeline } from "@/gen/ingestion/v1/pipelines_pb";
 
 import type { CreatePipelineModalStep } from "@/pages/pipelines/components/create/types";
-import type { PipelineSettingsPageScheduleState } from "@/pages/pipelines/settings/types";
+import type { PipelineNodeConfig } from "@/pages/pipelines/components/node/types";
+import type {
+  PipelineNotifier,
+  PipelineNotifierState,
+} from "@/pages/pipelines/components/notifier/types";
+import type { PipelineScheduleState } from "@/pages/pipelines/components/schedule/types";
 
 export enum CreatePipelineModalActionType {
   SELECT_SOURCE = "SELECT_SOURCE",
   TOGGLE_SINK = "TOGGLE_SINK",
   SET_ACTIVE_SINK = "SET_ACTIVE_SINK",
-  OPEN_SINK_RESOURCES = "OPEN_SINK_RESOURCES",
+  SET_EXECUTION_MODE = "SET_EXECUTION_MODE",
+  ADD_RESOURCE = "ADD_RESOURCE",
   SET_RESOURCE_SELECTION = "SET_RESOURCE_SELECTION",
   SET_RESOURCE_READ_MODE = "SET_RESOURCE_READ_MODE",
   SET_RESOURCE_CURSOR = "SET_RESOURCE_CURSOR",
   SET_SINK_WRITE_MODE = "SET_SINK_WRITE_MODE",
+  SET_NODE_CONFIG = "SET_NODE_CONFIG",
   SET_NAME = "SET_NAME",
   SET_DESCRIPTION = "SET_DESCRIPTION",
   SET_SCHEDULE = "SET_SCHEDULE",
+  ADD_NOTIFIER = "ADD_NOTIFIER",
+  UPDATE_NOTIFIER = "UPDATE_NOTIFIER",
+  REMOVE_NOTIFIER = "REMOVE_NOTIFIER",
   SET_WORKER_CONFIGURATION = "SET_WORKER_CONFIGURATION",
   GO_TO_STEP = "GO_TO_STEP",
   GO_BACK = "GO_BACK",
@@ -40,9 +50,14 @@ export interface SetActiveSinkAction {
   payload: Connection["id"];
 }
 
-export interface OpenSinkResourcesAction {
-  type: CreatePipelineModalActionType.OPEN_SINK_RESOURCES;
-  payload: Connection["id"];
+export interface SetExecutionModeAction {
+  type: CreatePipelineModalActionType.SET_EXECUTION_MODE;
+  payload: ExecutionMode;
+}
+
+export interface AddResourceAction {
+  type: CreatePipelineModalActionType.ADD_RESOURCE;
+  payload: { sinkId: Connection["id"]; name: Resource["name"] };
 }
 
 export interface SetResourceSelectionAction {
@@ -73,6 +88,11 @@ export interface SetSinkWriteModeAction {
   payload: { sinkId: Connection["id"]; writeMode: WriteMode };
 }
 
+export interface SetNodeConfigAction {
+  type: CreatePipelineModalActionType.SET_NODE_CONFIG;
+  payload: { connectionId: Connection["id"]; config: PipelineNodeConfig };
+}
+
 export interface SetNameAction {
   type: CreatePipelineModalActionType.SET_NAME;
   payload: Pipeline["name"];
@@ -85,7 +105,22 @@ export interface SetDescriptionAction {
 
 export interface SetScheduleAction {
   type: CreatePipelineModalActionType.SET_SCHEDULE;
-  payload: Partial<PipelineSettingsPageScheduleState>;
+  payload: Partial<PipelineScheduleState>;
+}
+
+export interface AddNotifierAction {
+  type: CreatePipelineModalActionType.ADD_NOTIFIER;
+  payload: PipelineNotifier;
+}
+
+export interface UpdateNotifierAction {
+  type: CreatePipelineModalActionType.UPDATE_NOTIFIER;
+  payload: { id: PipelineNotifier["id"]; partial: Partial<PipelineNotifierState> };
+}
+
+export interface RemoveNotifierAction {
+  type: CreatePipelineModalActionType.REMOVE_NOTIFIER;
+  payload: PipelineNotifier["id"];
 }
 
 export interface SetWorkerConfigurationAction {
@@ -98,11 +133,11 @@ export interface GoToStepAction {
   payload: CreatePipelineModalStep;
 }
 
-export interface GoBackAction {
+interface GoBackAction {
   type: CreatePipelineModalActionType.GO_BACK;
 }
 
-export interface GoNextAction {
+interface GoNextAction {
   type: CreatePipelineModalActionType.GO_NEXT;
 }
 
@@ -115,14 +150,19 @@ export type CreatePipelineModalAction =
   | SelectSourceAction
   | ToggleSinkAction
   | SetActiveSinkAction
-  | OpenSinkResourcesAction
+  | SetExecutionModeAction
+  | AddResourceAction
   | SetResourceSelectionAction
   | SetResourceReadModeAction
   | SetResourceCursorAction
   | SetSinkWriteModeAction
+  | SetNodeConfigAction
   | SetNameAction
   | SetDescriptionAction
   | SetScheduleAction
+  | AddNotifierAction
+  | UpdateNotifierAction
+  | RemoveNotifierAction
   | SetWorkerConfigurationAction
   | GoToStepAction
   | GoBackAction

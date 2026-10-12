@@ -4,10 +4,13 @@
 //
 // Path syntax:
 //
-//	a.b.c          — nested object keys
-//	items.0.name   — numeric segments index into arrays
-//	data.-1.id     — negative indices count from the end (-1 is the last)
-//	meta.sub\.key  — backslash escapes a literal dot inside a key
+//	a.b.c                — nested object keys
+//	items.0.name         — numeric segments index into arrays
+//	data.-1.id           — negative indices count from the end (-1 is the last)
+//	meta.sub\.key        — backslash escapes a literal dot inside a key
+//	link[relation=next]  — [key=value] selects the first array element whose
+//	                       key renders to value (bare `[k=v]` applies to the
+//	                       current array node)
 //
 // The package exposes three accessors. Each returns a typed error
 // (errs.ErrPathMissing, errs.ErrPathNull, or errs.ErrPathType) so callers
@@ -22,6 +25,7 @@
 package paths
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -84,6 +88,8 @@ func (v value) asString() (string, bool, error) {
 
 func (v value) toInt() (int64, error) {
 	switch x := v.raw.(type) {
+	case json.Number:
+		return scalar.NumberInt64(x)
 	case int:
 		return int64(x), nil
 	case int32:
@@ -174,6 +180,12 @@ func AsStringStrict(data any, path string) (string, bool, error) {
 
 // lookup walks data along path and returns the resolved value plus an error
 // classifying the outcome. Empty path returns the root.
+//
+// A segment may carry an element selector: `link[relation=next]` descends
+// into `link`, then picks the first array element whose `relation` equals
+// "next". A bare `[relation=next]` segment applies the selector to the
+// current node, which must already be an array. No match is ErrPathMissing,
+// so paginators that walk link arrays terminate cleanly on the last page.
 func lookup(data any, path string) (value, error) {
 	if path == "" {
 		return classify(data), nil
@@ -181,6 +193,17 @@ func lookup(data any, path string) (value, error) {
 	segs := split(path)
 	cur := data
 	for i, seg := range segs {
+		if key, selKey, selVal, ok := splitSelector(seg); ok {
+			selected, err := selectElement(cur, key, selKey, selVal)
+			if err != nil {
+				if errors.Is(err, errs.ErrPathMissing) {
+					return value{kind: kindMissing}, missingAt(segs, i)
+				}
+				return value{kind: kindOther}, fmt.Errorf("%w at %s", err, joinPrefix(segs, i+1))
+			}
+			cur = selected
+			continue
+		}
 		switch node := cur.(type) {
 		case nil:
 			return value{kind: kindMissing}, missingAt(segs, i)
@@ -264,6 +287,68 @@ func split(path string) []string {
 	return out
 }
 
+// splitSelector parses a segment carrying an element selector:
+// `key[selkey=selval]` or a bare `[selkey=selval]` (empty key). It returns
+// ok=false for ordinary segments, so literal keys that merely contain
+// brackets (without the `key=value` shape) keep their existing meaning.
+func splitSelector(seg string) (key, selKey, selVal string, ok bool) {
+	open := strings.IndexByte(seg, '[')
+	if open < 0 || !strings.HasSuffix(seg, "]") {
+		return "", "", "", false
+	}
+	inner := seg[open+1 : len(seg)-1]
+	k, v, found := strings.Cut(inner, "=")
+	if !found || k == "" {
+		return "", "", "", false
+	}
+	return seg[:open], k, v, true
+}
+
+// selectElement resolves `key` (unless empty, meaning cur is already the
+// array) and returns the first element whose selKey renders to selVal.
+// Elements that aren't objects, or lack the key, are skipped. No match is
+// ErrPathMissing; a non-array target is ErrPathType.
+func selectElement(cur any, key, selKey, selVal string) (any, error) {
+	if key != "" {
+		switch node := cur.(type) {
+		case map[string]any:
+			next, found := node[key]
+			if !found {
+				return nil, errs.ErrPathMissing
+			}
+			cur = next
+		case map[string]string:
+			next, found := node[key]
+			if !found {
+				return nil, errs.ErrPathMissing
+			}
+			cur = next
+		default:
+			return nil, fmt.Errorf("%w: cannot select %q from %T", errs.ErrPathType, key, cur)
+		}
+	}
+	arr, isArr := cur.([]any)
+	if !isArr {
+		return nil, fmt.Errorf("%w: [%s=%s] needs an array, got %T", errs.ErrPathType, selKey, selVal, cur)
+	}
+	for _, el := range arr {
+		em, isMap := el.(map[string]any)
+		if !isMap {
+			continue
+		}
+		raw, found := em[selKey]
+		if !found {
+			continue
+		}
+		text, ok := scalar.String(raw)
+		if !ok || text != selVal {
+			continue
+		}
+		return el, nil
+	}
+	return nil, errs.ErrPathMissing
+}
+
 func classify(v any) value {
 	switch x := v.(type) {
 	case nil:
@@ -272,7 +357,7 @@ func classify(v any) value {
 		return value{kind: kindString, raw: x}
 	case bool:
 		return value{kind: kindBool, raw: x}
-	case float64, int, int32, int64:
+	case float64, int, int32, int64, json.Number:
 		return value{kind: kindNumber, raw: x}
 	case []any:
 		return value{kind: kindArray, raw: x}

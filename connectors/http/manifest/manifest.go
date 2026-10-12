@@ -69,6 +69,7 @@ type Manifest struct {
 	Description  string                `yaml:"description,omitempty"`
 	DarkLogoURL  string                `yaml:"dark_logo_url,omitempty"`
 	LightLogoURL string                `yaml:"light_logo_url,omitempty"`
+	APIVersion   string                `yaml:"api_version,omitempty"`
 	Config       map[string]ConfigSpec `yaml:"config,omitempty"`
 	Defaults     Defaults              `yaml:"defaults,omitempty"`
 	FieldSets    map[string]FieldList  `yaml:"field_sets,omitempty"`
@@ -85,20 +86,29 @@ type Manifest struct {
 // DiscoverySpec chooses stable manifest resources or dynamically projected
 // upstream objects. Static discovery performs no HTTP requests.
 type DiscoverySpec struct {
-	Mode      string      `yaml:"mode"` // static | dynamic
-	Include   []string    `yaml:"include,omitempty"`
-	Resources []Discovery `yaml:"resources,omitempty"`
+	Mode             string      `yaml:"mode"` // static | dynamic
+	Include          []string    `yaml:"include,omitempty"`
+	Resources        []Discovery `yaml:"resources,omitempty"`
+	DefaultResources []string    `yaml:"default_resources,omitempty"` // nil selects all; empty selects none
+}
+
+// ConfigCondition controls field visibility based on another field's selected value.
+type ConfigCondition struct {
+	Field  string   `yaml:"field"`
+	Values []string `yaml:"values"`
 }
 
 // ConfigSpec declares one user-facing connector configuration field. Enum is
 // the ordered set of choices for enum and list fields.
 type ConfigSpec struct {
-	Type     string   `yaml:"type"`
-	Required bool     `yaml:"required,omitempty"`
-	Default  any      `yaml:"default,omitempty"`
-	Enum     []string `yaml:"enum,omitempty"`
-	Help     string   `yaml:"help,omitempty"`
-	Scope    string   `yaml:"scope,omitempty"`
+	VisibleWhen *ConfigCondition  `yaml:"visible_when,omitempty"`
+	Type        string            `yaml:"type"`
+	Required    bool              `yaml:"required,omitempty"`
+	Default     any               `yaml:"default,omitempty"`
+	Enum        []string          `yaml:"enum,omitempty"`
+	EnumLabels  map[string]string `yaml:"enum_labels,omitempty"`
+	Help        string            `yaml:"help,omitempty"`
+	Scope       string            `yaml:"scope,omitempty"`
 }
 
 // Defaults are inherited by resources when the corresponding resource field
@@ -205,13 +215,38 @@ func (a *AuthSpec) UnmarshalYAML(node *yaml.Node) error {
 		}
 		a.Params["user"] = referenceTemplate(spec.Username)
 		a.Params["pass"] = referenceTemplate(spec.Password)
+	case "select":
+		a.Type = "select"
+		var spec struct {
+			Field string `yaml:"field"`
+			Cases map[string]struct {
+				Required []string `yaml:"required"`
+				Auth     AuthSpec `yaml:"auth"`
+			} `yaml:"cases"`
+		}
+		if err := value.Decode(&spec); err != nil {
+			return err
+		}
+		cases := map[string]any{}
+		for name, choice := range spec.Cases {
+			required := make([]any, len(choice.Required))
+			for i, field := range choice.Required {
+				required[i] = field
+			}
+			cases[name] = map[string]any{"type": choice.Auth.Type, "params": choice.Auth.Params, "required": required}
+		}
+		a.Params["field"], a.Params["cases"] = spec.Field, cases
 	case "oauth2":
 		a.Type = "oauth2_cc"
 		var spec struct {
-			TokenURL     string `yaml:"token_url"`
-			ClientID     string `yaml:"client_id"`
-			ClientSecret string `yaml:"client_secret"`
-			Scope        string `yaml:"scope"`
+			TokenURL     string            `yaml:"token_url"`
+			ClientID     string            `yaml:"client_id"`
+			ClientSecret string            `yaml:"client_secret"`
+			Scope        string            `yaml:"scope"`
+			GrantType    string            `yaml:"grant_type"`
+			RefreshToken string            `yaml:"refresh_token"`
+			HeaderPrefix string            `yaml:"header_prefix"`
+			Params       map[string]string `yaml:"params"`
 		}
 		if err := value.Decode(&spec); err != nil {
 			return err
@@ -220,6 +255,14 @@ func (a *AuthSpec) UnmarshalYAML(node *yaml.Node) error {
 		a.Params["client_id"] = referenceTemplate(spec.ClientID)
 		a.Params["client_secret"] = referenceTemplate(spec.ClientSecret)
 		a.Params["scope"] = spec.Scope
+		a.Params["grant_type"] = spec.GrantType
+		a.Params["refresh_token"] = referenceTemplate(spec.RefreshToken)
+		a.Params["header_prefix"] = spec.HeaderPrefix
+		extra := map[string]any{}
+		for k, v := range spec.Params {
+			extra[k] = v
+		}
+		a.Params["params"] = extra
 	default:
 		return fmt.Errorf("unknown auth strategy %q", strategy)
 	}
@@ -235,8 +278,20 @@ func referenceTemplate(value string) string {
 
 // RateLimit configures the request rate ceiling, optionally header-driven.
 type RateLimit struct {
-	RequestsPerSecond float64       `yaml:"requests_per_second"`
-	Dynamic           *DynamicLimit `yaml:"dynamic,omitempty"`
+	Burst             int                 `yaml:"burst,omitempty"` // zero retains the default two-second burst
+	RequestsPerSecond float64             `yaml:"requests_per_second"`
+	Dynamic           *DynamicLimit       `yaml:"dynamic,omitempty"`
+	Responses         []RateLimitResponse `yaml:"responses,omitempty"`
+}
+
+// RateLimitResponse identifies throttling. All configured conditions must match.
+type RateLimitResponse struct {
+	Status         int    `yaml:"status"`
+	Header         string `yaml:"header,omitempty"`
+	HeaderValue    string `yaml:"header_value,omitempty"`
+	BodyPath       string `yaml:"body_path,omitempty"`
+	BodyContains   string `yaml:"body_contains,omitempty"`
+	BackoffSeconds int    `yaml:"backoff_seconds,omitempty"`
 }
 
 // DynamicLimit configures rate adjustment from response rate-limit headers.
@@ -277,16 +332,18 @@ type Resource struct {
 	Incremental *IncrementalSpec  `yaml:"incremental,omitempty"`
 	Parent      *ParentRef        `yaml:"parent,omitempty"`
 	Stream      *StreamSpec       `yaml:"stream,omitempty"`
+	Export      *ExportSpec       `yaml:"export,omitempty"`
 }
 
 // FieldSpec maps a response path to a typed output field.
 type FieldSpec struct {
-	Name     string            `yaml:"name"`
-	Path     string            `yaml:"path"`
-	Type     string            `yaml:"type"`
-	Shape    map[string]string `yaml:"shape,omitempty"`
-	Mode     string            `yaml:"mode,omitempty"` // raw | remainder (json fields only)
-	Nullable bool              `yaml:"nullable,omitempty"`
+	MaxString string            `yaml:"max_string,omitempty"` // maximum nonempty string child of an array
+	Name      string            `yaml:"name"`
+	Path      string            `yaml:"path"`
+	Type      string            `yaml:"type"`
+	Shape     map[string]string `yaml:"shape,omitempty"`
+	Mode      string            `yaml:"mode,omitempty"` // raw | remainder (json fields only)
+	Nullable  bool              `yaml:"nullable,omitempty"`
 }
 
 // FieldList is the v1 map-based field declaration. YAML mapping order is
@@ -309,16 +366,18 @@ func (fields *FieldList) UnmarshalYAML(node *yaml.Node) error {
 			field.Type = strings.TrimSuffix(value.Value, "?")
 		} else {
 			type valueSpec struct {
-				Path     string            `yaml:"path"`
-				Type     string            `yaml:"type"`
-				Shape    map[string]string `yaml:"shape,omitempty"`
-				Mode     string            `yaml:"mode,omitempty"`
-				Nullable bool              `yaml:"nullable,omitempty"`
+				MaxString string            `yaml:"max_string,omitempty"`
+				Path      string            `yaml:"path"`
+				Type      string            `yaml:"type"`
+				Shape     map[string]string `yaml:"shape,omitempty"`
+				Mode      string            `yaml:"mode,omitempty"`
+				Nullable  bool              `yaml:"nullable,omitempty"`
 			}
 			var spec valueSpec
 			if err := value.Decode(&spec); err != nil {
 				return fmt.Errorf("field %q: %w", name, err)
 			}
+			field.MaxString = spec.MaxString
 			field.Path, field.Type, field.Shape, field.Mode, field.Nullable = spec.Path, spec.Type, spec.Shape, spec.Mode, spec.Nullable
 			if field.Path == "" && len(field.Shape) == 0 {
 				field.Path = name
@@ -338,12 +397,22 @@ type BodySpec struct {
 
 // ResponseSpec configures where records live in the response body.
 type ResponseSpec struct {
-	Root        string          `yaml:"root"` // array | object (default object)
-	RecordsPath string          `yaml:"records_path"`
-	Cardinality string          `yaml:"cardinality,omitempty"` // many (default) | one
-	Error       *ErrorSpec      `yaml:"error,omitempty"`
-	Records     string          `yaml:"records,omitempty"`
-	Pagination  *PaginationSpec `yaml:"pagination,omitempty"`
+	Root        string             `yaml:"root"` // array | object (default object)
+	RecordsPath string             `yaml:"records_path"`
+	Cardinality string             `yaml:"cardinality,omitempty"`  // many (default) | one
+	PollPending *bool              `yaml:"poll_pending,omitempty"` // retry HTTP 202 until ready
+	Error       *ErrorSpec         `yaml:"error,omitempty"`
+	Empty       *EmptyResponseSpec `yaml:"empty,omitempty"`
+	Records     string             `yaml:"records,omitempty"`
+	Pagination  *PaginationSpec    `yaml:"pagination,omitempty"`
+}
+
+// EmptyResponseSpec recognizes an API's empty-result error by status and an
+// exact array of messages. It applies only to the resource that declares it.
+type EmptyResponseSpec struct {
+	Status     int      `yaml:"status"`
+	BodyPath   string   `yaml:"body_path"`
+	BodyEquals []string `yaml:"body_equals"`
 }
 
 // ErrorSpec configures detection of errors wrapped in 200 responses.
@@ -356,13 +425,16 @@ type ErrorSpec struct {
 
 // PaginationSpec configures how list endpoints are paged.
 type PaginationSpec struct {
-	Type string `yaml:"type"` // cursor | offset | page | link_header | next_url | none
+	Strict bool   `yaml:"strict,omitempty"` // require an explicit cursor envelope, including terminal pages
+	Type   string `yaml:"type"`             // cursor | offset | page | link_header | next_url | none
+
+	// Shared by cursor, offset, and page pagination.
+	InjectInto  string `yaml:"inject_into,omitempty"` // body | query | header (cursor only)
+	HasMorePath string `yaml:"has_more_path,omitempty"`
 
 	// cursor
 	CursorPath  string `yaml:"cursor_path,omitempty"`
 	CursorParam string `yaml:"cursor_param,omitempty"`
-	InjectInto  string `yaml:"inject_into,omitempty"` // body | query | header
-	HasMorePath string `yaml:"has_more_path,omitempty"`
 	// AllowNullTerminates, when true, treats an explicit JSON null at
 	// cursor_path as "no more pages" rather than an error. Default false:
 	// null is rejected so that an API silently changing its termination
@@ -431,6 +503,7 @@ func (p *PaginationSpec) UnmarshalYAML(node *yaml.Node) error {
 			Request        string `yaml:"request"`
 			More           string `yaml:"more"`
 			NullTerminates bool   `yaml:"null_terminates"`
+			Strict         bool   `yaml:"strict"`
 		}
 		if err := value.Decode(&spec); err != nil {
 			return err
@@ -439,9 +512,11 @@ func (p *PaginationSpec) UnmarshalYAML(node *yaml.Node) error {
 		if !ok || (target != "query" && target != "body" && target != "header") {
 			return fmt.Errorf("cursor.request must be query.<name>, body.<path>, or header.<name>")
 		}
+		p.Strict = spec.Strict
 		p.Type, p.CursorPath, p.InjectInto, p.CursorParam, p.HasMorePath, p.AllowNullTerminates = "cursor", spec.Response, target, param, spec.More, spec.NullTerminates
 	case "offset":
 		var spec struct {
+			More     string `yaml:"more"`
 			Offset   string `yaml:"offset"`
 			Limit    string `yaml:"limit"`
 			PageSize int    `yaml:"page_size"`
@@ -449,17 +524,12 @@ func (p *PaginationSpec) UnmarshalYAML(node *yaml.Node) error {
 		if err := value.Decode(&spec); err != nil {
 			return err
 		}
-		offsetTarget, offsetParam, ok := strings.Cut(spec.Offset, ".")
-		if !ok {
-			offsetTarget, offsetParam = "query", spec.Offset
-		}
-		limitTarget, limitParam, ok := strings.Cut(spec.Limit, ".")
-		if !ok {
-			limitTarget, limitParam = "query", spec.Limit
-		}
+		offsetTarget, offsetParam := paginationTarget(spec.Offset)
+		limitTarget, limitParam := paginationTarget(spec.Limit)
 		if offsetTarget != limitTarget || (offsetTarget != "query" && offsetTarget != "body") {
 			return fmt.Errorf("offset pagination fields must share a query or body target")
 		}
+		p.HasMorePath = spec.More
 		p.Type, p.OffsetParam, p.LimitParam, p.PageSize, p.OffsetInjectInto = "offset", offsetParam, limitParam, spec.PageSize, offsetTarget
 	case "page":
 		var spec struct {
@@ -467,20 +537,41 @@ func (p *PaginationSpec) UnmarshalYAML(node *yaml.Node) error {
 			Size       string `yaml:"size"`
 			PageSize   int    `yaml:"page_size"`
 			TotalPages string `yaml:"total_pages"`
+			More       string `yaml:"more"`
 		}
 		if err := value.Decode(&spec); err != nil {
 			return err
 		}
-		p.Type, p.PageParam, p.SizeParam, p.PageSize, p.TotalPagesPath = "page", spec.Number, spec.Size, spec.PageSize, spec.TotalPages
+		numberTarget, numberParam := paginationTarget(spec.Number)
+		sizeTarget, sizeParam := paginationTarget(spec.Size)
+		if numberTarget != sizeTarget || (numberTarget != "query" && numberTarget != "body") {
+			return fmt.Errorf("page pagination fields must share a query or body target")
+		}
+		p.Type, p.PageParam, p.SizeParam, p.PageSize, p.TotalPagesPath = "page", numberParam, sizeParam, spec.PageSize, spec.TotalPages
+		p.InjectInto, p.HasMorePath = numberTarget, spec.More
 	default:
 		return fmt.Errorf("unknown pagination strategy %q", strategy)
 	}
 	return nil
 }
 
+// paginationTarget defaults bare page and offset parameter names to query
+// targets. Only known injection targets act as prefixes, so a dotted query
+// parameter name like pagination.page passes through verbatim.
+func paginationTarget(field string) (string, string) {
+	for _, target := range []string{"query", "body", "header"} {
+		if param, ok := strings.CutPrefix(field, target+"."); ok {
+			return target, param
+		}
+	}
+	return "query", field
+}
+
 // IncrementalSpec configures watermark-based incremental extraction.
 type IncrementalSpec struct {
-	CursorField string `yaml:"cursor_field"`
+	// ResponseCursor persists an opaque terminal response token across runs.
+	ResponseCursor string `yaml:"response_cursor,omitempty"`
+	CursorField    string `yaml:"cursor_field"`
 	// CursorPath is resolved from the projected field declaration after parsing.
 	// It is runtime-only; manifests continue to name the output cursor field.
 	CursorPath    string `yaml:"-"`
@@ -494,12 +585,21 @@ type IncrementalSpec struct {
 	// OverlapSeconds re-fetches a sliding window before a time or numeric
 	// timestamp cursor to tolerate retroactive updates behind the max.
 	OverlapSeconds int `yaml:"overlap_seconds,omitempty"`
+	// ValuePrefix is prepended to the watermark value when it is injected
+	// into the request (query, header, or body). The stored checkpoint and
+	// all comparisons keep the raw value; only the wire representation is
+	// prefixed. FHIR search needs `_lastUpdated=ge<ts>` — a bare timestamp
+	// carries `eq` semantics and would silently return the wrong result set.
+	ValuePrefix string `yaml:"value_prefix,omitempty"`
 }
 
 // DurableCheckpointKey returns the stable storage key for this watermark.
 func (s IncrementalSpec) DurableCheckpointKey() string {
 	if s.CheckpointKey != "" {
 		return s.CheckpointKey
+	}
+	if s.ResponseCursor != "" {
+		return "response_token:" + s.ResponseCursor
 	}
 	return s.CursorField
 }

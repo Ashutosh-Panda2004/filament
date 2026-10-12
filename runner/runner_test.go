@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/galaxy-io/filament"
+	"github.com/galaxy-io/filament/arrowbatch"
 	"github.com/galaxy-io/filament/datastore/sqlite"
 	"github.com/galaxy-io/filament/eventbus"
 	"github.com/galaxy-io/filament/eventbus/inproc"
@@ -391,5 +392,173 @@ func TestSeedEmitterProgressIgnoresPartialAttemptCounters(t *testing.T) {
 	}
 	if records, bytes := em.runTotals(); records != 0 || bytes != 0 {
 		t.Fatalf("partial totals = %d/%d, want 0/0", records, bytes)
+	}
+}
+
+type schemaFailSink struct {
+	incrementalTestSink
+}
+
+func (*schemaFailSink) EnsureSchema(_ context.Context, resource string, _ filament.RecordSchema) error {
+	if resource == "orders" {
+		return errors.New("schema boom")
+	}
+	return nil
+}
+
+// A schema failure on one resource names that resource as the cause and marks
+// the others aborted, instead of repeating the cause against every resource.
+func TestRunOneSchemaFailureAttributesResource(t *testing.T) {
+	bus := inproc.New()
+	facts, err := bus.Subscribe(events.AllPattern(), eventbus.SubOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = facts.Close() }()
+
+	failed := make(chan string, 1)
+	resourceFailed := make(chan [2]string, 2)
+	go func() {
+		for msg := range facts.C() {
+			f, decodeErr := events.Decode(msg)
+			_ = msg.Ack()
+			if decodeErr != nil {
+				continue
+			}
+			if d, ok := f.Data.(events.RunFailedEvent); ok {
+				failed <- d.Error
+				return
+			}
+			if d, ok := f.Data.(events.ResourceFailedEvent); ok {
+				resourceFailed <- [2]string{f.Resource, d.Error}
+			}
+		}
+	}()
+
+	sources := registry.NewSources()
+	sources.Register("test", func() filament.Source { return &incrementalTestSource{} })
+	sinks := registry.NewSinks()
+	sinks.Register("test-sink", func() filament.Sink { return &schemaFailSink{} })
+
+	RunOne(context.Background(), Deps{
+		Bus:       bus,
+		DataStore: sqlite.NewMemory(),
+		Sources:   sources,
+		Sinks:     sinks,
+	}, filament.RunSpec{
+		Tenant:         "t1",
+		Run:            "r1",
+		Source:         filament.Ref{Connector: "test"},
+		Sink:           filament.Ref{Connector: "test-sink"},
+		Resources:      []string{"users", "orders"},
+		IngestionTypes: map[string]filament.IngestionType{"": filament.IngestionFullUpsert},
+	})
+
+	select {
+	case msg := <-failed:
+		if !strings.Contains(msg, "ensure schema") || !strings.Contains(msg, "schema boom") {
+			t.Fatalf("run.failed error = %q, want the schema failure", msg)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no run.failed fact published")
+	}
+	got := map[string]string{}
+	for range 2 {
+		select {
+		case pair := <-resourceFailed:
+			got[pair[0]] = pair[1]
+		case <-time.After(5 * time.Second):
+			t.Fatalf("resource.failed facts = %v, want users and orders", got)
+		}
+	}
+	if !strings.Contains(got["orders"], "schema boom") {
+		t.Errorf("orders error = %q, want the cause", got["orders"])
+	}
+	if !strings.Contains(got["users"], `aborted: resource "orders" failed`) || strings.Contains(got["users"], "boom") {
+		t.Errorf("users error = %q, want aborted on orders' account", got["users"])
+	}
+}
+
+type mixedUpsertSource struct {
+	commitTestSource
+	resumeResources []string
+}
+
+func (s *mixedUpsertSource) Schema(_ context.Context, resource string) (filament.RecordSchema, error) {
+	schema := filament.RecordSchema{Resource: resource, Fields: []filament.SchemaField{{Name: "id", Logical: filament.LogicalInt64}}}
+	if resource == "keyed" {
+		schema.PrimaryKey = []string{"id"}
+	}
+	return schema, nil
+}
+
+func (s *mixedUpsertSource) PlanResume(_ context.Context, resources []string, _ map[string]filament.Checkpoint) (map[string]filament.Checkpoint, error) {
+	s.resumeResources = append([]string(nil), resources...)
+	return nil, nil
+}
+
+func (s *mixedUpsertSource) ExtractFrom(ctx context.Context, sink filament.RecordSink, opts filament.ExtractOpts, _ map[string]filament.Checkpoint) error {
+	for _, resource := range opts.Resources {
+		schema, _ := s.Schema(ctx, resource)
+		writer, err := sink.Builder(resource, 0, schema)
+		if err != nil {
+			return err
+		}
+		for range 2 {
+			writer.Int64(1)
+			if err := writer.EndRow(filament.RowMeta{}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+type mixedUpsertSink struct {
+	incrementalTestSink
+	opened    filament.RunSpec
+	policies  map[string]filament.WritePolicy
+	committed bool
+}
+
+func (s *mixedUpsertSink) Open(_ context.Context, spec filament.RunSpec) error {
+	s.opened = spec
+	s.policies = map[string]filament.WritePolicy{}
+	return nil
+}
+
+func (s *mixedUpsertSink) Apply(_ context.Context, batch *arrowbatch.Batch, opts filament.ApplyOptions) (filament.WriteReceipt, error) {
+	s.policies[batch.Resource] = opts.Policy
+	return filament.WriteReceipt{Rows: batch.NumRows(), WriteCRC: batch.IntegrityCRC()}, nil
+}
+func (s *mixedUpsertSink) Commit(context.Context) error { s.committed = true; return nil }
+
+func TestRunOneMixedUpsertUsesAppendForKeylessResource(t *testing.T) {
+	bus := inproc.New()
+	defer bus.Close()
+	src, sink := &mixedUpsertSource{}, &mixedUpsertSink{}
+	sources, sinks := registry.NewSources(), registry.NewSinks()
+	sources.Register("test", func() filament.Source { return src })
+	sinks.Register("test-sink", func() filament.Sink { return sink })
+	err := RunOne(context.Background(), Deps{Bus: bus, DataStore: sqlite.NewMemory(), Sources: sources, Sinks: sinks}, filament.RunSpec{
+		Tenant: "t1", Run: "mixed-upsert", Source: filament.Ref{Connector: "test"}, Sink: filament.Ref{Connector: "test-sink"},
+		Resources: []string{"keyed", "keyless"}, IngestionTypes: map[string]filament.IngestionType{"": filament.IngestionFullUpsert},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sink.committed {
+		t.Fatal("mixed run did not commit")
+	}
+	if len(src.resumeResources) != 1 || src.resumeResources[0] != "keyed" {
+		t.Fatalf("resume resources: %v", src.resumeResources)
+	}
+	for resource, mode := range map[string]filament.WriteMode{"keyed": filament.WriteUpsert, "keyless": filament.WriteAppend} {
+		if sink.policies[resource].Capability.Mode != mode || sink.opened.WritePolicies[resource].Capability.Mode != mode {
+			t.Fatalf("%s: opened=%+v applied=%+v", resource, sink.opened.WritePolicies[resource], sink.policies[resource])
+		}
+	}
+	if sink.opened.IngestionTypes["keyless"] != filament.IngestionFullAppend {
+		t.Fatal("sink received unresolved keyless ingestion type")
 	}
 }

@@ -1,7 +1,16 @@
 import { create } from "@bufbuild/protobuf";
 
-import { ConnectorKind, ReadMode, ReplicationMode } from "@/gen/ingestion/v1/common_pb";
+import {
+  ConnectorKind,
+  ExecutionMode,
+  ReadMode,
+  ReplicationMode,
+} from "@/gen/ingestion/v1/common_pb";
 import type { Connection } from "@/gen/ingestion/v1/connections_pb";
+import {
+  type CreatePipelineNotifierRequest,
+  CreatePipelineNotifierRequestSchema,
+} from "@/gen/ingestion/v1/notifiers_pb";
 import {
   type CreatePipelineRequest,
   CreatePipelineRequestSchema,
@@ -21,12 +30,15 @@ import type {
   CreatePipelineModalSinkRow,
   CreatePipelineModalState,
 } from "@/pages/pipelines/components/create/types";
+import type { PipelineNodeConfig } from "@/pages/pipelines/components/node/types";
+import type { PipelineNotifierState } from "@/pages/pipelines/components/notifier/types";
+import { mapPipelineNotifierStateToInput } from "@/pages/pipelines/components/notifier/utils";
 import { parseWorkerConfiguration } from "@/pages/pipelines/components/worker/utils";
-import { mapPipelineScheduleStateToCron } from "@/pages/pipelines/settings/utils";
 
-const buildNodes = (
+const createNodes = (
   sourceConnection: Connection | null,
   sinks: CreatePipelineModalSinkRow[],
+  nodeConfigs: Record<Connection["id"], PipelineNodeConfig>,
 ): PipelineNode[] => {
   if (!sourceConnection) return [];
   return [
@@ -34,24 +46,26 @@ const buildNodes = (
       id: sourceConnection.id,
       kind: ConnectorKind.SOURCE,
       connectionId: sourceConnection.id,
+      config: nodeConfigs[sourceConnection.id],
     }),
     ...sinks.map((sink) =>
       create(PipelineNodeSchema, {
         id: sink.connection.id,
         kind: ConnectorKind.SINK,
         connectionId: sink.connection.id,
+        config: nodeConfigs[sink.connection.id],
       }),
     ),
   ];
 };
 
-const buildCursors = (
+const createCursors = (
   rows: CreatePipelineModalResourceRow[],
   readMode: ReadMode,
 ): ResourceCursorConfig[] => {
   if (readMode !== ReadMode.INCREMENTAL) return [];
   return rows
-    .filter((row) => !!row.cursorField)
+    .filter((row) => !row.managedIncremental && !!row.cursorField)
     .map((row) =>
       create(ResourceCursorConfigSchema, {
         resource: row.name,
@@ -61,71 +75,49 @@ const buildCursors = (
     );
 };
 
-const buildSinkEdges = ({
+const createSinkEdges = ({
   sourceId,
   rows,
   sink,
-  isCdc,
+  hasReadLevers,
 }: {
   sourceId: PipelineNode["id"];
   rows: CreatePipelineModalResourceRow[];
   sink: CreatePipelineModalSinkRow;
-  isCdc: boolean;
-}): PipelineEdge[] => {
-  const selectable = rows.filter((row) => row.isSelectable);
-  const selected = rows.filter((row) => row.isSelected);
-  const readModes = [
-    ...new Set(selected.map((row) => (isCdc ? ReadMode.UNSPECIFIED : row.readMode))),
-  ];
-
-  const isCollapsible =
-    !selectable.length || (selected.length === selectable.length && readModes.length <= 1);
-
-  if (isCollapsible) {
-    const readMode = readModes[0] ?? (isCdc ? ReadMode.UNSPECIFIED : ReadMode.FULL);
-    return [
-      create(PipelineEdgeSchema, {
+  hasReadLevers: boolean;
+}): PipelineEdge[] =>
+  rows
+    .filter((row) => row.isSelected)
+    .map((row) => {
+      const readMode = hasReadLevers ? row.readMode : ReadMode.UNSPECIFIED;
+      return create(PipelineEdgeSchema, {
         fromNode: sourceId,
-        resource: "",
+        resource: row.name,
         toNode: sink.connection.id,
         readMode,
         writeMode: sink.writeMode,
-        cursors: isCdc ? [] : buildCursors(selected, readMode),
-      }),
-    ];
-  }
-
-  return selected.map((row) => {
-    const readMode = isCdc ? ReadMode.UNSPECIFIED : row.readMode;
-    return create(PipelineEdgeSchema, {
-      fromNode: sourceId,
-      resource: row.name,
-      toNode: sink.connection.id,
-      readMode,
-      writeMode: sink.writeMode,
-      cursors: isCdc ? [] : buildCursors([row], readMode),
+        cursors: hasReadLevers ? createCursors([row], readMode) : [],
+      });
     });
-  });
-};
 
-const buildEdges = ({
+const createEdges = ({
   sourceConnection,
   rowsBySink,
   sinks,
-  isCdc,
+  hasReadLevers,
 }: {
   sourceConnection: Connection | null;
   rowsBySink: Record<Connection["id"], CreatePipelineModalResourceRow[]>;
   sinks: CreatePipelineModalSinkRow[];
-  isCdc: boolean;
+  hasReadLevers: boolean;
 }): PipelineEdge[] => {
   if (!sourceConnection) return [];
   return sinks.flatMap((sink) =>
-    buildSinkEdges({
+    createSinkEdges({
       sourceId: sourceConnection.id,
       rows: rowsBySink[sink.connection.id] ?? [],
       sink,
-      isCdc,
+      hasReadLevers,
     }),
   );
 };
@@ -134,24 +126,29 @@ export const mapCreatePipelineStateToVersionRequest = ({
   sourceConnection,
   rowsBySink,
   sinks,
+  nodeConfigs,
   replication,
+  executionMode,
   pipelineId,
 }: {
   sourceConnection: Connection | null;
   rowsBySink: Record<Connection["id"], CreatePipelineModalResourceRow[]>;
   sinks: CreatePipelineModalSinkRow[];
+  nodeConfigs: Record<Connection["id"], PipelineNodeConfig>;
   replication: ReplicationMode;
+  executionMode: ExecutionMode;
   pipelineId: Pipeline["id"];
 }): CreatePipelineVersionRequest =>
   create(CreatePipelineVersionRequestSchema, {
     pipelineId,
     graph: {
-      nodes: buildNodes(sourceConnection, sinks),
-      edges: buildEdges({
+      nodes: createNodes(sourceConnection, sinks, nodeConfigs),
+      edges: createEdges({
         sourceConnection,
         rowsBySink,
         sinks,
-        isCdc: replication === ReplicationMode.CDC,
+        hasReadLevers:
+          replication !== ReplicationMode.CDC && executionMode !== ExecutionMode.CONTINUOUS,
       }),
     },
   });
@@ -161,14 +158,25 @@ export const mapCreatePipelineStateToRequest = (
   name: Pipeline["name"],
 ): CreatePipelineRequest =>
   create(CreatePipelineRequestSchema, {
+    executionMode: state.executionMode,
     name: name.trim(),
     description: state.description.trim(),
-    schedule: state.schedule.isEnabled
-      ? {
-          cron: mapPipelineScheduleStateToCron(state.schedule),
-          timezone: state.schedule.timezone,
-          isEnabled: true,
-        }
-      : undefined,
+    schedule:
+      state.executionMode !== ExecutionMode.CONTINUOUS && state.schedule.isEnabled
+        ? {
+            cron: state.schedule.cron.trim(),
+            timezone: state.schedule.timezone,
+            isEnabled: true,
+          }
+        : undefined,
     workerConfiguration: parseWorkerConfiguration(state.workerConfiguration).configuration,
+  });
+
+export const mapCreatePipelineNotifierToRequest = (
+  notifier: PipelineNotifierState,
+  pipelineId: Pipeline["id"],
+): CreatePipelineNotifierRequest =>
+  create(CreatePipelineNotifierRequestSchema, {
+    pipelineId,
+    notifier: mapPipelineNotifierStateToInput(notifier),
   });

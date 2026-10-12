@@ -3,9 +3,15 @@ go 1.26.4
 use (
 	.
 	./cmd
+	./connectors/bigquery
 	./connectors/iceberg
+	./connectors/motherduck
 	./connectors/object
+	./connectors/redshift
+	./connectors/snowflake
+	./identity/keycloak
 	./identity/zitadel
 	./secret/aws
+	./secret/gcp
 	./tests
 )

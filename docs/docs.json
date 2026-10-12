@@ -54,6 +54,11 @@
   "search": {
     "prompt": "Search"
   },
+  "integrations": {
+    "posthog": {
+      "apiKey": "phc_sdTaNu7OMDIz2h1263vOXmNJ87wjPLXeIYvdZDPXAXm"
+    }
+  },
   "contextual": {
     "options": [
       "copy",
@@ -111,6 +116,7 @@
           "pages/guides/concepts/overview",
           "pages/guides/concepts/architecture",
           "pages/guides/concepts/replication-modes",
+          "pages/guides/concepts/streaming",
           "pages/guides/concepts/integrity-and-checkpoints",
           "pages/guides/concepts/runs-and-recovery"
         ]
@@ -124,6 +130,13 @@
         ]
       },
       {
+        "group": "SDKs",
+        "pages": [
+          "pages/guides/sdks/python",
+          "pages/guides/sdks/typescript"
+        ]
+      },
+      {
         "group": "Connectors",
         "pages": [
           "pages/connectors/overview/introduction",
@@ -132,14 +145,31 @@
             "pages": [
               "pages/connectors/sources/postgres",
               "pages/connectors/sources/mysql",
+              "pages/connectors/sources/kafka",
+              "pages/connectors/sources/nats",
+              "pages/connectors/sources/apollo",
               "pages/connectors/sources/attio",
+              "pages/connectors/sources/fhir",
+              "pages/connectors/sources/fxmacrodata",
               "pages/connectors/sources/github",
+              "pages/connectors/sources/gong",
+              "pages/connectors/sources/granola",
+              "pages/connectors/sources/heyreach",
+              "pages/connectors/sources/hubspot",
+              "pages/connectors/sources/instantly",
               "pages/connectors/sources/linear",
+              "pages/connectors/sources/livetennisapi",
+              "pages/connectors/sources/mailchimp",
+              "pages/connectors/sources/monday",
               "pages/connectors/sources/notion",
+              "pages/connectors/sources/novada",
+              "pages/connectors/sources/pipedrive",
               "pages/connectors/sources/posthog",
               "pages/connectors/sources/resend",
+              "pages/connectors/sources/servicetitan",
               "pages/connectors/sources/slack",
               "pages/connectors/sources/stripe",
+              "pages/connectors/sources/zoho",
               "pages/connectors/sources/sample"
             ]
           },
@@ -148,8 +178,16 @@
             "pages": [
               "pages/connectors/sinks/postgres",
               "pages/connectors/sinks/mysql",
+              "pages/connectors/sinks/kafka",
+              "pages/connectors/sinks/nats",
               "pages/connectors/sinks/clickhouse",
+              "pages/connectors/sinks/motherduck",
+              "pages/connectors/sinks/snowflake",
+              "pages/connectors/sinks/bigquery",
+              "pages/connectors/sinks/redshift",
+              "pages/connectors/sinks/meilisearch",
               "pages/connectors/sinks/iceberg",
+              "pages/connectors/sinks/gcs",
               "pages/connectors/sinks/aws-s3",
               "pages/connectors/sinks/standard-output"
             ]
@@ -161,6 +199,7 @@
               "pages/connectors/building-a-connector/writing-a-source",
               "pages/connectors/building-a-connector/writing-a-sink",
               "pages/connectors/building-a-connector/optional-interfaces",
+              "pages/connectors/building-a-connector/streaming",
               "pages/connectors/building-a-connector/http-manifests"
             ]
           }
@@ -173,7 +212,8 @@
           "pages/guides/deployment/configuration",
           "pages/guides/deployment/kubernetes",
           "pages/guides/deployment/railway",
-          "pages/guides/deployment/render"
+          "pages/guides/deployment/render",
+          "pages/guides/deployment/digitalocean"
         ]
       },
       {

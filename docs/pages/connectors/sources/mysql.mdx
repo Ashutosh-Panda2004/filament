@@ -4,6 +4,8 @@ description: "Keyset snapshot, incremental watermark, and binlog CDC reads from 
 icon: "https://cdn.getgalaxy.io/sources/source-icon-mysql-dark.svg"
 ---
 
+Connector ID `mysql`
+
 The MySQL source reads from MySQL 8.0+ with resumable keyset snapshots,
 timestamp-watermark incremental reads, and binlog CDC. The connector is beta.
 
@@ -25,6 +27,7 @@ timestamp-watermark incremental reads, and binlog CDC. The connector is beta.
 | `shard_pages` | Pipeline | `16384` | InnoDB pages per parallel shard (≈256 MiB at 16 KiB pages). `0` disables sharding. |
 | `max_conns` | Pipeline | | Maximum source connections. |
 | `server_id` | Pipeline | `62347` | Replication client `server_id` for CDC. Must be unique in the replica topology. |
+| `snapshot_mode` | Pipeline | `initial` | CDC only. `initial` reads a table in full before streaming it, `none` streams from the current position only. |
 
 ## Snapshot reads
 
@@ -88,21 +91,31 @@ later. GTID checkpoints advance after a committed transaction. A crash during
 a transaction replays the whole transaction, so use merge writes that converge
 by primary key.
 
-<Warning>
-  MySQL CDC does not snapshot existing rows. The first run starts at the
-  current binlog tail, so rows present before the pipeline was created are
-  never emitted by CDC. Replication mode cannot be changed on an existing
-  connection. To backfill, create a standard connection and full pipeline,
-  complete that run, then create a separate CDC connection and route for new
-  changes. Plan the handoff carefully because the two pipelines do not share a
-  checkpoint.
-</Warning>
+When a selected table has no CDC checkpoint, the run first reads it in full
+through a consistent snapshot, and the change stream then continues from the
+binlog position captured just before that snapshot opened. To make the two
+agree, the run takes read locks on those tables in a side session for the
+instant between capturing the position and opening the snapshot. Writers of
+those tables wait for a couple of round trips and nothing else is blocked. The
+baseline and the stream then share one exact point in both cursor modes, so a
+pipeline can start on CDC alone without a separate full run. Run row limits
+do not apply to this bootstrap read. The tables must use InnoDB, since only a
+transactional engine gives the snapshot one point in time. Binlog retention
+must cover the time the bootstrap read takes, or the stream cannot start from
+the captured position.
+
+`snapshot_mode=none` skips that read. A table without a checkpoint streams
+from the binlog position at the start of its first run, so the sink starts
+empty and fills in as rows change. Updates carry the full row, so a merge sink
+upserts rows it has never seen; deletes of unseen rows are no-ops. This mode
+needs neither `LOCK TABLES` nor InnoDB.
 
 Requirements:
 
 - `ROW` binlog format (the 8.0+ default)
 - Binlog retention covering the resume window
 - `REPLICATION SLAVE` and `REPLICATION CLIENT` privileges
+- `LOCK TABLES` and `SELECT` on the CDC tables, held for a moment when a table is first bootstrapped
 - A TCP connection (unix sockets are rejected for CDC)
 
 Behavior worth knowing:

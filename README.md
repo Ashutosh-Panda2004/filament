@@ -9,7 +9,7 @@
 [![Release](https://img.shields.io/github/v/release/galaxy-io/filament?filter=v*)](https://github.com/galaxy-io/filament/releases)
 [![Tests](https://github.com/galaxy-io/filament/actions/workflows/test.yaml/badge.svg)](https://github.com/galaxy-io/filament/actions/workflows/test.yaml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![DeepWiki](https://img.shields.io/badge/DeepWiki-galaxy--io%2Ffilament-blue.svg?logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACwAAAAyCAYAAAAnWDnqAAAAAXNSR0IArs4c6QAAA05JREFUaEPtmUtyEzEQhtWTQyQLHNak2AB7ZnyXZMEjXMGeK/AIi+QuHrMnbChYY7MIh8g01fJoopFb0uhhEqqcbWTp06/uv1saEDv4O3n3dV60RfP947Mm9/SQc0ICFQgzfc4CYZoTPAswgSJCCUJUnAAoRHOAUOcATwbmVLWdGoH//PB8mnKqScAhsD0kYP3j/Yt5LPQe2KvcXmGvRHcDnpxfL2zOYJ1mFwrryWTz0advv1Ut4CJgf5uhDuDj5eUcAUoahrdY/56ebRWeraTjMt/00Sh3UDtjgHtQNHwcRGOC98BJEAEymycmYcWwOprTgcB6VZ5JK5TAJ+fXGLBm3FDAmn6oPPjR4rKCAoJCal2eAiQp2x0vxTPB3ALO2CRkwmDy5WohzBDwSEFKRwPbknEggCPB/imwrycgxX2NzoMCHhPkDwqYMr9tRcP5qNrMZHkVnOjRMWwLCcr8ohBVb1OMjxLwGCvjTikrsBOiA6fNyCrm8V1rP93iVPpwaE+gO0SsWmPiXB+jikdf6SizrT5qKasx5j8ABbHpFTx+vFXp9EnYQmLx02h1QTTrl6eDqxLnGjporxl3NL3agEvXdT0WmEost648sQOYAeJS9Q7bfUVoMGnjo4AZdUMQku50McDcMWcBPvr0SzbTAFDfvJqwLzgxwATnCgnp4wDl6Aa+Ax283gghmj+vj7feE2KBBRMW3FzOpLOADl0Isb5587h/U4gGvkt5v60Z1VLG8BhYjbzRwyQZemwAd6cCR5/XFWLYZRIMpX39AR0tjaGGiGzLVyhse5C9RKC6ai42ppWPKiBagOvaYk8lO7DajerabOZP46Lby5wKjw1HCRx7p9sVMOWGzb/vA1hwiWc6jm3MvQDTogQkiqIhJV0nBQBTU+3okKCFDy9WwferkHjtxib7t3xIUQtHxnIwtx4mpg26/HfwVNVDb4oI9RHmx5WGelRVlrtiw43zboCLaxv46AZeB3IlTkwouebTr1y2NjSpHz68WNFjHvupy3q8TFn3Hos2IAk4Ju5dCo8B3wP7VPr/FGaKiG+T+v+TQqIrOqMTL1VdWV1DdmcbO8KXBz6esmYWYKPwDL5b5FA1a0hwapHiom0r/cKaoqr+27/XcrS5UwSMbQAAAABJRU5ErkJggg==)](https://deepwiki.com/galaxy-io/filament)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/galaxy-io/filament)
 [![Slack](https://img.shields.io/badge/slack-join-4A154B?logo=slack&logoColor=white)](https://join.slack.com/t/galaxy-filament/shared_invite/zt-486oaagls-WCKm605mP6NCmoB3E7frpQ)
 
 </div>
@@ -36,6 +36,8 @@ brew install galaxy-io/tap/filament
 
 Prebuilt binaries for Linux and macOS are on the [releases page](https://github.com/galaxy-io/filament/releases).
 
+Upgrade a direct installation with `filament upgrade`. For Homebrew installations, use `brew upgrade galaxy-io/tap/filament`.
+
 ## Getting started
 
 To run Filament locally, install Go, Docker, `just`, Node.js, and pnpm. On macOS, the repository's `Brewfile` installs the toolchain:
@@ -43,6 +45,8 @@ To run Filament locally, install Go, Docker, `just`, Node.js, and pnpm. On macOS
 ```sh
 brew bundle
 ```
+
+For Podman users, set `CONTAINER_ENGINE=podman` to use Podman with the commands below. See [engine configuration](docs/pages/guides/contributing/local-development.mdx).
 
 Start PostgreSQL and NATS, then run Filament:
 
@@ -69,11 +73,15 @@ For a simpler hosted deployment without Kubernetes, deploy with 1 click:
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/filament?referralCode=H5DcHR&utm_medium=integration&utm_source=template&utm_campaign=generic)
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https%3A%2F%2Fgithub.com%2Fgalaxy-io%2Ffilament&branch=main&path=deploy%2Frender.yaml)
+[![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/galaxy-io/filament/tree/main)
 
 </div>
 
-Read the [Railway](https://filament.getgalaxy.io/pages/guides/deployment/railway) and [Render](https://filament.getgalaxy.io/pages/guides/deployment/render) guides for the deployed resources, runtime behavior, and production checklist.
-The Render infrastructure is defined in [`deploy/render.yaml`](deploy/render.yaml).
+Read the [Railway](https://filament.getgalaxy.io/pages/guides/deployment/railway), [Render](https://filament.getgalaxy.io/pages/guides/deployment/render), and [DigitalOcean](https://filament.getgalaxy.io/pages/guides/deployment/digitalocean) guides for the deployed resources, runtime behavior, and production checklist.
+
+> [!WARNING]
+> The DigitalOcean deployment uses [filament/standalone](https://github.com/galaxy-io/filament/blob/main/cmd/standalone/main.go), an all-in-one image that includes the control-plane, server, and SQLite datastore.
+
 
 ## How it works
 

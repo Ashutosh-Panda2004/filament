@@ -1,10 +1,4 @@
-import { BeaconVariant } from "@galaxy-io/dls/beacons/Beacon";
-import { ChartPalette } from "@galaxy-io/dls/charts/types";
-import { TextVariant } from "@galaxy-io/dls/text/Text";
-
-import { RunStatus } from "@/gen/ingestion/v1/runs_pb";
-
-export const PIPELINE_RUN_RESOURCE_LOADING_ROW_COUNT = 1;
+import type { Space } from "@galaxy-io/dls/theme/enums";
 
 export const PIPELINE_HISTORY_RUN_TABLE_COLUMN_WIDTH_STATUS = 120;
 export const PIPELINE_HISTORY_RUN_TABLE_COLUMN_WIDTH_VERSION = 120;
@@ -12,51 +6,5 @@ export const PIPELINE_HISTORY_RUN_TABLE_COLUMN_WIDTH_RECORDS = 110;
 export const PIPELINE_HISTORY_RUN_TABLE_COLUMN_WIDTH_VOLUME = 120;
 export const PIPELINE_HISTORY_RUN_TABLE_COLUMN_WIDTH_DURATION = 110;
 
-export const PIPELINE_RUN_STATUS_TO_LABEL_MAP: Record<RunStatus, string> = {
-  [RunStatus.UNSPECIFIED]: "Unknown",
-  [RunStatus.REQUESTED]: "Requested",
-  [RunStatus.RUNNING]: "Running",
-  [RunStatus.COMPLETED]: "Completed",
-  [RunStatus.FAILED]: "Failed",
-  [RunStatus.CANCELED]: "Cancelled",
-  [RunStatus.PAUSED]: "Paused",
-  [RunStatus.PARTIAL]: "Partial",
-  [RunStatus.SCHEDULED]: "Scheduled",
-};
-
-export const PIPELINE_RUN_STATUS_TO_BEACON_VARIANT_MAP: Record<RunStatus, BeaconVariant> = {
-  [RunStatus.UNSPECIFIED]: BeaconVariant.SECONDARY,
-  [RunStatus.REQUESTED]: BeaconVariant.ORANGE,
-  [RunStatus.RUNNING]: BeaconVariant.BLUE,
-  [RunStatus.COMPLETED]: BeaconVariant.SUCCESS,
-  [RunStatus.FAILED]: BeaconVariant.ERROR,
-  [RunStatus.CANCELED]: BeaconVariant.SECONDARY,
-  [RunStatus.PAUSED]: BeaconVariant.TEAL,
-  [RunStatus.PARTIAL]: BeaconVariant.PINK,
-  [RunStatus.SCHEDULED]: BeaconVariant.YELLOW,
-};
-
-export const PIPELINE_RUN_STATUS_TO_CHART_PALETTE_MAP: Record<RunStatus, ChartPalette | undefined> =
-  {
-    [RunStatus.UNSPECIFIED]: undefined,
-    [RunStatus.COMPLETED]: ChartPalette.GREEN,
-    [RunStatus.FAILED]: ChartPalette.RED,
-    [RunStatus.RUNNING]: ChartPalette.BLUE,
-    [RunStatus.REQUESTED]: ChartPalette.ORANGE,
-    [RunStatus.SCHEDULED]: ChartPalette.YELLOW,
-    [RunStatus.CANCELED]: ChartPalette.SECONDARY,
-    [RunStatus.PAUSED]: ChartPalette.TEAL,
-    [RunStatus.PARTIAL]: ChartPalette.PINK,
-  };
-
-export const PIPELINE_RUN_STATUS_TO_TEXT_VARIANT_MAP: Record<RunStatus, TextVariant> = {
-  [RunStatus.UNSPECIFIED]: TextVariant.SECONDARY,
-  [RunStatus.REQUESTED]: TextVariant.ORANGE,
-  [RunStatus.RUNNING]: TextVariant.BLUE,
-  [RunStatus.COMPLETED]: TextVariant.SUCCESS,
-  [RunStatus.FAILED]: TextVariant.ERROR,
-  [RunStatus.CANCELED]: TextVariant.SECONDARY,
-  [RunStatus.PAUSED]: TextVariant.TEAL,
-  [RunStatus.PARTIAL]: TextVariant.PINK,
-  [RunStatus.SCHEDULED]: TextVariant.YELLOW,
-};
+export const PIPELINE_HISTORY_RUN_INFO_LOADING_WIDTH = 240;
+export const PIPELINE_HISTORY_RUN_INFO_TABLE_INSET: Space = 4;

@@ -67,14 +67,24 @@ app.kubernetes.io/component: control-plane
 app.kubernetes.io/component: worker
 {{- end -}}
 
+{{- define "filament.worker.selectorLabels" -}}
+{{ include "filament.selectorLabels" . }}
+app.kubernetes.io/component: worker
+{{- end -}}
+
 {{- define "filament.worker.serviceAccountName" -}}
-{{- .Values.controlPlane.dispatch.worker.serviceAccount.name | default (include "filament.worker.fullname" .) -}}
+{{- .Values.worker.serviceAccount.name | default (include "filament.worker.fullname" .) -}}
 {{- end -}}
 
 
-{{/* User's existingSecret, else the chart-created Secret. */}}
+{{/* User's existingSecret, else the chart's own Secret. */}}
 {{- define "filament.secretName" -}}
 {{- .Values.existingSecret | default (printf "%s-secret" (include "filament.fullname" .)) -}}
+{{- end -}}
+
+{{/* Takes Keycloak values so the parent and subchart share the same name. */}}
+{{- define "filament.keycloak.secretName" -}}
+{{- .Values.existingSecret | default (printf "%s-keycloak-auth" .Release.Name) -}}
 {{- end -}}
 
 {{/* Secret the vendored provider mints its own admin token into during setup,
@@ -86,7 +96,6 @@ app.kubernetes.io/component: worker
 {{- printf "%s-pat" (default "iam-admin" $machine.Username) -}}
 {{- end -}}
 {{- end -}}
-
 
 {{- define "filament.server.fullname" -}}
 {{- printf "%s-server" (include "filament.fullname" .) | trunc 63 | trimSuffix "-" -}}

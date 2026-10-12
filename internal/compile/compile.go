@@ -34,9 +34,8 @@ var ErrInvalid = errors.New("invalid pipeline")
 // Compiler collapses a pipeline's current version into ready-to-submit run
 // requests.
 type Compiler struct {
-	Store   filament.DataStore
-	Sources filament.SourceRegistry
-	Sinks   filament.SinkRegistry
+	Store  filament.DataStore
+	Worker filament.Worker
 }
 
 // CompiledRun is one route's ready-to-submit admission, keyed by its canvas edge.
@@ -63,6 +62,15 @@ func (c *Compiler) Compile(ctx context.Context, tenant filament.TenantID, pipeli
 	if pipeline.GetDeletedAt() != 0 {
 		return nil, fmt.Errorf("%w: pipeline %q is deleted", ErrPrecondition, pipeline.GetId())
 	}
+	options.Execution, err = resolveExecution(pipeline.GetExecutionMode(), options.Execution)
+	if err != nil {
+		return nil, err
+	}
+	if options.Execution == filament.ExecutionContinuous {
+		if _, ok := c.Store.(filament.ContinuousRunStore); !ok {
+			return nil, fmt.Errorf("%w: %w", ErrPrecondition, filament.ErrContinuousDisabled)
+		}
+	}
 	version, err := c.Store.LoadPipelineVersion(ctx, tenant, pipeline.GetId(), 0)
 	if errors.Is(err, filament.ErrNotFound) {
 		return nil, fmt.Errorf("%w: pipeline %q has no version", ErrPrecondition, pipeline.GetId())
@@ -70,20 +78,15 @@ func (c *Compiler) Compile(ctx context.Context, tenant filament.TenantID, pipeli
 	if err != nil {
 		return nil, fmt.Errorf("load pipeline version: %w", err)
 	}
-	nodes := map[string]*ingestionv1.PipelineNode{}
-	connections := map[string]filament.Connection{}
-	for _, node := range version.GetGraph().GetNodes() {
-		nodes[node.GetId()] = node
-		if _, ok := connections[node.GetConnectionId()]; !ok {
-			conn, err := c.Store.LoadConnection(ctx, tenant, node.GetConnectionId())
-			if err != nil {
-				return nil, fmt.Errorf("load connection %q: %w", node.GetConnectionId(), err)
-			}
-			if conn.DeletedAt != 0 {
-				return nil, fmt.Errorf("%w: connection %q is deleted", ErrPrecondition, node.GetConnectionId())
-			}
-			connections[node.GetConnectionId()] = conn
+	if options.Execution == filament.ExecutionContinuous {
+		if scheduleID != "" {
+			return nil, fmt.Errorf("%w: continuous execution cannot use cron schedules", ErrInvalid)
 		}
+		return c.compileContinuous(ctx, tenant, pipeline, version, token, options, workerCfg)
+	}
+	nodes, connections, err := c.loadGraphConnections(ctx, tenant, version.GetGraph())
+	if err != nil {
+		return nil, err
 	}
 
 	groups, err := groupEdges(version.GetGraph().GetEdges(), nodes)
@@ -95,25 +98,29 @@ func (c *Compiler) Compile(ctx context.Context, tenant filament.TenantID, pipeli
 	for _, group := range groups {
 		key := group.key
 		resources, selectors := routeResources(group)
-		sourceRef, err := c.resolveNodeRef(group.source, connections)
+		sourceRef, err := c.resolveNodeRef(ctx, group.source, connections)
 		if err != nil {
 			return nil, err
 		}
-		sinkRef, err := c.resolveNodeRef(group.sink, connections)
+		sinkRef, err := c.resolveNodeRef(ctx, group.sink, connections)
 		if err != nil {
 			return nil, err
 		}
-		source, err := c.Sources.Resolve(sourceRef.Connector)
+		sourceSpec, err := c.Worker.SourceSpec(ctx, sourceRef.Connector)
 		if err != nil {
 			return nil, err
 		}
-		cdc := filament.ReplicationOf(source, filament.NewConfig(sourceRef.Config)) == filament.ReplicationCDC
+		cdc := filament.ReplicationFor(sourceSpec, filament.NewConfig(sourceRef.Config)) == filament.ReplicationCDC
 		ingestionTypes, err := compileIngestionTypes(group, cdc)
 		if err != nil {
 			return nil, err
 		}
+		transformDef, err := transformDefinition(group)
+		if err != nil {
+			return nil, err
+		}
 		replicationStream, err := c.planRouteReplicationStream(
-			cdc, source, pipeline.GetId(), version.GetId(), tenant,
+			ctx, cdc, pipeline.GetId(), version.GetId(), tenant,
 			key, group, connections, sourceRef, sinkRef,
 		)
 		if err != nil {
@@ -132,11 +139,13 @@ func (c *Compiler) Compile(ctx context.Context, tenant filament.TenantID, pipeli
 				Resources:           resources,
 				Selectors:           selectors,
 				IngestionTypes:      ingestionTypes,
+				WritePolicies:       destinationWritePolicies(group),
 				CheckpointRoute:     key,
 				CursorConfigs:       group.cursorConfigs,
 				Options:             options,
 				ScheduleID:          scheduleID,
 				WorkerConfiguration: worker,
+				Transform:           transformDef,
 			},
 			DesiredReplicationStream: replicationStream,
 		}})
@@ -160,8 +169,8 @@ func routeResources(group *routeGroup) (resources, selectors []string) {
 }
 
 func (c *Compiler) planRouteReplicationStream(
+	ctx context.Context,
 	cdc bool,
-	source filament.Source,
 	pipelineID, pipelineVersionID string,
 	tenant filament.TenantID,
 	route string,
@@ -169,15 +178,25 @@ func (c *Compiler) planRouteReplicationStream(
 	connections map[string]filament.Connection,
 	sourceRef, sinkRef filament.Ref,
 ) (*filament.ReplicationStream, error) {
-	planner, plansStreams := source.(filament.ReplicationStreamPlanner)
-	if !cdc || !plansStreams {
+	if !cdc {
 		return nil, nil
+	}
+	// A CDC source without a planner has no external consumer to admit.
+	id := uuid.NewString()
+	plan, err := c.Worker.PlanReplicationStream(ctx, sourceRef.Connector, filament.ReplicationStreamPlanningRequest{
+		ReplicationStreamID: id, SourceConnectionID: group.source.ConnectionId, Config: filament.NewConfig(sourceRef.Config),
+	})
+	if errors.Is(err, filament.ErrUnsupported) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("plan replication stream %q: %w", route, err)
 	}
 	if _, ok := c.Store.(durableReplicationStreamStore); !ok {
 		return nil, fmt.Errorf("%w: datastore %q cannot durably admit replication streams", ErrPrecondition, c.Store.Name())
 	}
 	planned, err := c.planReplicationStream(
-		planner, pipelineID, pipelineVersionID, tenant, route, group, connections, sourceRef, sinkRef,
+		id, plan, pipelineID, pipelineVersionID, tenant, route, group, connections, sourceRef, sinkRef,
 	)
 	if err != nil {
 		return nil, err
@@ -186,7 +205,8 @@ func (c *Compiler) planRouteReplicationStream(
 }
 
 func (c *Compiler) planReplicationStream(
-	planner filament.ReplicationStreamPlanner,
+	id string,
+	plan filament.ReplicationStreamPlan,
 	pipelineID, pipelineVersionID string,
 	tenant filament.TenantID,
 	route string,
@@ -194,13 +214,6 @@ func (c *Compiler) planReplicationStream(
 	connections map[string]filament.Connection,
 	sourceRef, sinkRef filament.Ref,
 ) (filament.ReplicationStream, error) {
-	id := uuid.NewString()
-	plan, err := planner.PlanReplicationStream(filament.ReplicationStreamPlanningRequest{
-		ReplicationStreamID: id, Config: filament.NewConfig(sourceRef.Config),
-	})
-	if err != nil {
-		return filament.ReplicationStream{}, fmt.Errorf("plan replication stream %q: %w", route, err)
-	}
 	fingerprint, err := replicationStreamContinuityFingerprint(group, connections, sourceRef.Connector, plan.ContinuityConfig, sinkRef)
 	if err != nil {
 		return filament.ReplicationStream{}, fmt.Errorf("fingerprint replication stream %q: %w", route, err)
@@ -222,22 +235,24 @@ func replicationStreamContinuityFingerprint(group *routeGroup, connections map[s
 	sourceConnection := connections[group.source.GetConnectionId()]
 	sinkConnection := connections[group.sink.GetConnectionId()]
 	identity := struct {
-		SourceConnector         string         `json:"source_connector"`
-		SourceConnectionID      string         `json:"source_connection_id"`
-		SourceConnectionVersion int64          `json:"source_connection_version"`
-		SourceContinuity        map[string]any `json:"source_continuity"`
-		SinkConnector           string         `json:"sink_connector"`
-		SinkConnectionID        string         `json:"sink_connection_id"`
-		SinkConnectionVersion   int64          `json:"sink_connection_version"`
-		SinkConfig              map[string]any `json:"sink_config"`
-		WriteMode               string         `json:"write_mode"`
+		SourceConnector         string            `json:"source_connector"`
+		SourceConnectionID      string            `json:"source_connection_id"`
+		SourceConnectionVersion int64             `json:"source_connection_version"`
+		SourceContinuity        map[string]any    `json:"source_continuity"`
+		SinkConnector           string            `json:"sink_connector"`
+		SinkConnectionID        string            `json:"sink_connection_id"`
+		SinkConnectionVersion   int64             `json:"sink_connection_version"`
+		SinkConfig              map[string]any    `json:"sink_config"`
+		WriteMode               string            `json:"write_mode"`
+		DestinationResources    map[string]string `json:"destination_resources,omitempty"`
 	}{
 		SourceConnector: sourceConnector, SourceConnectionID: sourceConnection.ID,
 		SourceConnectionVersion: sourceConnection.Version,
 		SourceContinuity:        sourceContinuity,
 		SinkConnector:           sinkRef.Connector, SinkConnectionID: sinkConnection.ID,
 		SinkConnectionVersion: sinkConnection.Version, SinkConfig: sinkRef.Config,
-		WriteMode: fmt.Sprint(group.writeMode),
+		WriteMode:            fmt.Sprint(group.writeMode),
+		DestinationResources: group.destinations,
 	}
 	raw, err := json.Marshal(identity)
 	if err != nil {
@@ -274,13 +289,13 @@ func compileIngestionTypes(group *routeGroup, cdc bool) (map[string]filament.Ing
 // Connection it references, with the node's config/secret_refs shallow-merged
 // on top as the PIPELINE overlay (node keys win). connection_id is required.
 // It rejects an overlay that tries to set a CONNECTION-scoped field.
-func (c *Compiler) resolveNodeRef(node *ingestionv1.PipelineNode, connections map[string]filament.Connection) (filament.Ref, error) {
+func (c *Compiler) resolveNodeRef(ctx context.Context, node *ingestionv1.PipelineNode, connections map[string]filament.Connection) (filament.Ref, error) {
 	conn, ok := connections[node.GetConnectionId()]
 	if !ok {
 		return filament.Ref{}, fmt.Errorf("%w: node %q references missing connection %q", ErrInvalid, node.GetId(), node.GetConnectionId())
 	}
 	overlay := structMap(node.GetConfig())
-	if schema, err := c.schemaFor(conn.Kind, conn.Connector); err == nil {
+	if schema, err := c.schemaFor(ctx, conn.Kind, conn.Connector); err == nil {
 		if err := ValidateOverlayConfig(schema, overlay); err != nil {
 			return filament.Ref{}, fmt.Errorf("%w: node %q: %v", ErrInvalid, node.GetId(), err)
 		}
@@ -293,21 +308,21 @@ func (c *Compiler) resolveNodeRef(node *ingestionv1.PipelineNode, connections ma
 }
 
 // schemaFor resolves a connector's config schema by kind + name from the
-// source and sink registries.
-func (c *Compiler) schemaFor(kind filament.ConnectorKind, connector string) (filament.ConfigSchema, error) {
+// worker's specs.
+func (c *Compiler) schemaFor(ctx context.Context, kind filament.ConnectorKind, connector string) (filament.ConfigSchema, error) {
 	switch kind {
 	case filament.ConnectorKindSource:
-		src, err := c.Sources.Resolve(connector)
+		spec, err := c.Worker.SourceSpec(ctx, connector)
 		if err != nil {
 			return filament.ConfigSchema{}, err
 		}
-		return src.Spec().Config, nil
+		return spec.Config, nil
 	case filament.ConnectorKindSink:
-		sink, err := c.Sinks.Resolve(connector)
+		spec, err := c.Worker.SinkSpec(ctx, connector)
 		if err != nil {
 			return filament.ConfigSchema{}, err
 		}
-		return sink.Spec().Config, nil
+		return spec.Config, nil
 	default:
 		return filament.ConfigSchema{}, fmt.Errorf("connector kind is required")
 	}
@@ -334,4 +349,24 @@ func structMap(s *structpb.Struct) map[string]any {
 		return map[string]any{}
 	}
 	return s.AsMap()
+}
+
+func (c *Compiler) loadGraphConnections(ctx context.Context, tenant filament.TenantID, graph *ingestionv1.PipelineGraph) (map[string]*ingestionv1.PipelineNode, map[string]filament.Connection, error) {
+	nodes := map[string]*ingestionv1.PipelineNode{}
+	connections := map[string]filament.Connection{}
+	for _, node := range graph.GetNodes() {
+		nodes[node.GetId()] = node
+		if _, ok := connections[node.GetConnectionId()]; !ok {
+			conn, err := c.Store.LoadConnection(ctx, tenant, node.GetConnectionId())
+			if err != nil {
+				return nil, nil, fmt.Errorf("load connection %q: %w", node.GetConnectionId(), err)
+			}
+			if conn.DeletedAt != 0 {
+				return nil, nil, fmt.Errorf("%w: connection %q is deleted", ErrPrecondition, node.GetConnectionId())
+			}
+			connections[node.GetConnectionId()] = conn
+		}
+	}
+
+	return nodes, connections, nil
 }

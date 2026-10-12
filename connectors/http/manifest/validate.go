@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -22,25 +23,19 @@ const (
 func (m *Manifest) Normalize() {
 	for i := range m.Resources {
 		r := &m.Resources[i]
-		if len(r.UseFields) > 0 {
-			var inherited FieldList
-			for _, name := range r.UseFields {
-				inherited = append(inherited, m.FieldSets[name]...)
-			}
-			r.Fields = append(inherited, r.Fields...)
-		}
-		if len(r.ExcludeFields) > 0 {
-			excluded := make(map[string]struct{}, len(r.ExcludeFields))
-			for _, name := range r.ExcludeFields {
-				excluded[name] = struct{}{}
-			}
-			fields := r.Fields[:0]
-			for _, field := range r.Fields {
-				if _, skip := excluded[field.Name]; !skip {
-					fields = append(fields, field)
+		m.normalizeResourceFields(r)
+		// Export requests have their own HTTP and decoding settings. Resource
+		// defaults must not accidentally paginate a job or change its payload.
+		if r.Mode == "export" {
+			if r.ForEach != "" {
+				if r.Parent == nil {
+					r.Parent = &ParentRef{}
+				}
+				if r.Parent.Resource == "" {
+					r.Parent.Resource = r.ForEach
 				}
 			}
-			r.Fields = fields
+			continue
 		}
 		for name, ref := range r.Params {
 			r.Path = strings.ReplaceAll(r.Path, "{"+name+"}", referenceTemplate(ref))
@@ -58,6 +53,9 @@ func (m *Manifest) Normalize() {
 		}
 		if r.Response.Cardinality == "" {
 			r.Response.Cardinality = m.Defaults.Response.Cardinality
+		}
+		if r.Response.PollPending == nil {
+			r.Response.PollPending = m.Defaults.Response.PollPending
 		}
 		if r.Response.Error == nil {
 			r.Response.Error = m.Defaults.Response.Error
@@ -130,6 +128,31 @@ func mergeStringDefaults(defaults, local map[string]string) map[string]string {
 //nolint:gocyclo,funlen // linear sequence of independent field validations
 func (m *Manifest) validateSemantics() error {
 	var agg errs.ManifestErrors
+	if m.Defaults.Response.Empty != nil {
+		_ = agg.Addf("defaults.response.empty", "must be declared on individual resources")
+	}
+
+	for name, spec := range m.Config {
+		for value := range spec.EnumLabels {
+			if (spec.Type != "enum" && spec.Type != "list") || !slices.Contains(spec.Enum, value) {
+				_ = agg.Addf("config."+name+".enum_labels", "label references unknown enum option %q", value)
+			}
+		}
+		if spec.VisibleWhen == nil {
+			continue
+		}
+		condition := spec.VisibleWhen
+		controller, ok := m.Config[condition.Field]
+		if !ok || condition.Field == name || controller.Type != "enum" || controller.VisibleWhen != nil || (controller.Scope == "pipeline") != (spec.Scope == "pipeline") {
+			_ = agg.Addf("config."+name+".visible_when", "must reference an unconditional enum field in the same scope")
+			continue
+		}
+		for _, value := range condition.Values {
+			if !slices.Contains(controller.Enum, value) {
+				_ = agg.Addf("config."+name+".visible_when", "unknown option %q", value)
+			}
+		}
+	}
 
 	if m.Name == "" {
 		_ = agg.Addf("name", "is required")
@@ -148,6 +171,7 @@ func (m *Manifest) validateSemantics() error {
 		validateTemplate(&agg, fmt.Sprintf("connection.headers[%q]", k), v)
 	}
 	validateTemplateScopes(&agg, "connection.base_url", m.Connection.BaseURL, template.AuthScopes)
+	validateVersionHeaders(&agg, m)
 	validateAuthParams(&agg, "connection.auth", m.Connection.Auth.Params)
 
 	names := make(map[string]struct{}, len(m.Resources))
@@ -171,7 +195,7 @@ func (m *Manifest) validateSemantics() error {
 		}
 		names[r.Name] = struct{}{}
 
-		if r.Path == "" {
+		if r.Path == "" && r.Mode != "export" {
 			_ = agg.Addf(path+".path", "is required")
 		}
 		if r.Parent != nil && r.Parent.Resource == "" {
@@ -191,6 +215,7 @@ func (m *Manifest) validateSemantics() error {
 
 		validateTemplate(&agg, path+".emit_as", r.EmitAs)
 		validateTemplate(&agg, path+".path", r.Path)
+		validateExport(&agg, path, *r)
 		fieldNames := make(map[string]struct{}, len(r.Fields))
 		for j, f := range r.Fields {
 			fieldPath := fmt.Sprintf("%s.fields[%d]", path, j)
@@ -212,6 +237,9 @@ func (m *Manifest) validateSemantics() error {
 			}
 			if f.Mode == "remainder" && f.Type != "json" {
 				_ = agg.Addf(fieldPath+".mode", "remainder is only supported for json fields")
+			}
+			if f.MaxString != "" && (f.Type != "string" || !f.Nullable || len(f.Shape) > 0 || f.Mode != "") {
+				_ = agg.Addf(path+".fields", "max_string requires a nullable string field without shape or mode")
 			}
 			if len(f.Shape) > 0 && f.Type != "json" {
 				_ = agg.Addf(fieldPath+".shape", "shape is only supported for json fields")
@@ -255,13 +283,36 @@ func (m *Manifest) validateSemantics() error {
 		if r.Response.Cardinality != "" && r.Response.Cardinality != "many" && r.Response.Cardinality != "one" {
 			_ = agg.Addf(path+".response.cardinality", "must be many or one")
 		}
+		if empty := r.Response.Empty; empty != nil {
+			if empty.Status < 400 || empty.Status > 499 {
+				_ = agg.Addf(path+".response.empty.status", "must be a 4xx status")
+			}
+			if empty.BodyPath == "" || len(empty.BodyEquals) == 0 || slices.Contains(empty.BodyEquals, "") {
+				_ = agg.Addf(path+".response.empty", "requires a body_path and a nonempty array of messages in body_equals")
+			}
+		}
 		if err := checkEnum(r.Pagination.Type, ValidPaginationTypes); err != nil {
 			_ = agg.Addf(path+".pagination.type", "%v", err)
 		}
 		if err := checkEnum(r.Pagination.InjectInto, ValidPaginationInject); err != nil {
 			_ = agg.Addf(path+".pagination.inject_into", "%v", err)
 		}
-		if r.Incremental != nil {
+		if r.Pagination.Strict && (r.Pagination.Type != "cursor" || r.Pagination.HasMorePath == "" || r.Response.RecordsPath == "") {
+			_ = agg.Addf(path+".pagination", "strict cursor pagination requires more and records paths")
+		}
+		if r.Incremental != nil && r.Incremental.ResponseCursor != "" {
+			spec := r.Incremental
+			if spec.CursorField != "" || spec.Comparator != "" || spec.OverlapSeconds != 0 {
+				_ = agg.Addf(path+".incremental", "response_cursor cannot use a row cursor, comparator, or overlap")
+			}
+			if r.Parent != nil || r.Stream != nil || r.EmitAs != "" || r.CaptureOnly {
+				_ = agg.Addf(path+".incremental", "response_cursor requires a top-level, non-streaming resource")
+			}
+			if r.Pagination.Type != "cursor" || r.Pagination.CursorPath != spec.ResponseCursor || r.Pagination.CursorParam != spec.StartParam || r.Pagination.InjectInto != spec.InjectInto || r.Pagination.HasMorePath == "" || r.Response.RecordsPath == "" {
+				_ = agg.Addf(path+".incremental", "response_cursor requires matching cursor pagination with an explicit more path and records path")
+			}
+		}
+		if r.Incremental != nil && r.Incremental.ResponseCursor == "" {
 			if r.Incremental.CursorField == "" {
 				_ = agg.Addf(path+".incremental.cursor_field", "is required")
 			}
@@ -325,9 +376,31 @@ func (m *Manifest) validateSemantics() error {
 	if m.Discovery.Mode == "dynamic" && len(m.Discovery.Include) > 0 {
 		_ = agg.Addf("discovery.include", "is only supported in static mode")
 	}
+	if m.Discovery.Mode != "static" && m.Discovery.DefaultResources != nil {
+		_ = agg.Addf("discovery.default_resources", "is only supported in static mode")
+	}
+	for i, name := range m.Discovery.DefaultResources {
+		path := fmt.Sprintf("discovery.default_resources[%d]", i)
+		if _, ok := names[name]; !ok {
+			_ = agg.Addf(path, "unknown resource %q", name)
+		} else if byName[name].CaptureOnly {
+			_ = agg.Addf(path, "resource %q is capture_only", name)
+		} else if len(m.Discovery.Include) > 0 && !slices.Contains(m.Discovery.Include, name) {
+			_ = agg.Addf(path, "resource %q is not in discovery.include", name)
+		}
+	}
 	for i := range m.Discovery.Resources {
 		path := fmt.Sprintf("discovery[%d]", i)
 		validateDiscovery(&agg, path, &m.Discovery.Resources[i], names)
+		d := m.Discovery.Resources[i]
+		if byName[d.From] != nil && byName[d.From].Mode == "export" {
+			_ = agg.Addf(path+".from", "exports cannot be used for dynamic discovery")
+		}
+		for _, target := range d.Scope.AppliesTo {
+			if byName[target] != nil && byName[target].Mode == "export" {
+				_ = agg.Addf(path+".scope", "export scope injection is not supported")
+			}
+		}
 		kind := m.Discovery.Resources[i].Map.Kind
 		if kind == "" {
 			continue
@@ -338,6 +411,9 @@ func (m *Manifest) validateSemantics() error {
 		seenKinds[kind] = struct{}{}
 	}
 
+	if m.Connection.RateLimit.Burst < 0 {
+		_ = agg.Addf("connection.rate_limit.burst", "must be non-negative")
+	}
 	if m.Connection.RateLimit.Dynamic != nil {
 		if err := checkEnum(m.Connection.RateLimit.Dynamic.ResetFormat, ValidRateLimitResetFormats); err != nil {
 			_ = agg.Addf("connection.rate_limit.dynamic.reset_format", "%v", err)
@@ -354,6 +430,31 @@ func (m *Manifest) validateSemantics() error {
 			_ = agg.Addf(fmt.Sprintf("resources[%q].parent.resource", r.Name),
 				"unknown parent %q", r.Parent.Resource)
 			continue
+		}
+		if r.Export != nil {
+			for _, key := range r.Export.ParentKey {
+				if _, ok := parent.Capture[key]; !ok {
+					_ = agg.Addf(fmt.Sprintf("resources[%q].export.parent_key", r.Name), "%q is not captured by the parent", key)
+				}
+			}
+		}
+		if r.Export != nil {
+			visited := map[string]bool{}
+			for ancestor := parent; ancestor != nil && !visited[ancestor.Name]; {
+				visited[ancestor.Name] = true
+				if ancestor.Incremental != nil || ancestor.Mode == "stream" {
+					_ = agg.Addf(fmt.Sprintf("resources[%q].parent", r.Name), "export ancestors must be finite full-read indexes without incremental filters")
+					break
+				}
+				if ancestor.Parent == nil {
+					break
+				}
+				// Cycles are checked below; bound this walk independently.
+				ancestor = byName[ancestor.Parent.Resource]
+			}
+		}
+		if parent.Mode == "export" {
+			_ = agg.Addf(fmt.Sprintf("resources[%q].parent", r.Name), "export resources cannot supply parent captures")
 		}
 		if r.Parent.Since == "" {
 			continue
@@ -466,7 +567,10 @@ func paginationInjectionCollides(pagination PaginationSpec, incremental Incremen
 			target, param = pagination.OffsetInjectInto, pagination.LimitParam
 		}
 	case "page":
-		target = "query"
+		target = pagination.InjectInto
+		if target == "" {
+			target = "query"
+		}
 		if pagination.PageParam == incremental.StartParam {
 			param = pagination.PageParam
 		} else {
@@ -649,4 +753,42 @@ func formatCycle(cycle []string) string {
 		out += " → " + n
 	}
 	return out
+}
+
+// validateVersionHeaders requires api_version to match any pinned version
+// header. Header names compare case-insensitively per RFC 9110.
+func validateVersionHeaders(agg *errs.ManifestErrors, m *Manifest) {
+	for name, value := range m.Connection.Headers {
+		if !slices.ContainsFunc(VersionHeaders, func(h string) bool { return strings.EqualFold(h, name) }) {
+			continue
+		}
+		if m.APIVersion == "" {
+			_ = agg.Addf("api_version", "is required when %s is pinned", name)
+		} else if value != m.APIVersion {
+			_ = agg.Addf("api_version", "%q does not match %s %q", m.APIVersion, name, value)
+		}
+	}
+}
+
+func (m *Manifest) normalizeResourceFields(r *Resource) {
+	if len(r.UseFields) > 0 {
+		var inherited FieldList
+		for _, name := range r.UseFields {
+			inherited = append(inherited, m.FieldSets[name]...)
+		}
+		r.Fields = append(inherited, r.Fields...)
+	}
+	if len(r.ExcludeFields) > 0 {
+		excluded := make(map[string]struct{}, len(r.ExcludeFields))
+		for _, name := range r.ExcludeFields {
+			excluded[name] = struct{}{}
+		}
+		fields := r.Fields[:0]
+		for _, field := range r.Fields {
+			if _, skip := excluded[field.Name]; !skip {
+				fields = append(fields, field)
+			}
+		}
+		r.Fields = fields
+	}
 }

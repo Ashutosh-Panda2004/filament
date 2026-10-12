@@ -5,12 +5,133 @@ description: "Declarative YAML manifests that drive the generic HTTP API source"
 
 Use an HTTP manifest when an API can be described through endpoints,
 authentication, pagination, and JSON field mappings. You write YAML instead of
-a new Go connector. Filament's Notion, Linear, Attio, GitHub, Slack, Resend,
-Stripe, and PostHog sources all use this path.
+a new Go connector. Most of Filament's SaaS sources take this path. The
+[connector catalog](/pages/connectors/overview/introduction) lists which ones.
 
 To try a manifest without recompiling Filament, create an `httpapi` connection
 and set its required `manifest_path` to your v1 YAML file. Once embedded in the
 catalog, the same manifest behaves like any other named source.
+
+## Register a bundled connector
+
+Bundled HTTP connectors are discovered from the embedded `manifests` directory.
+Directories and registry keys identify the upstream API version the manifest
+uses. They are not Filament connector revisions or YAML grammar versions.
+Adding a connector or supporting another API version requires no Go registration
+or provider-specific constructor:
+
+```text
+connectors/http/manifests/
+  github/
+    registry.json
+    2022-11-28/manifest.yaml
+  attio/
+    registry.json
+    v2/manifest.yaml
+```
+
+For example, GitHub's registry matches the manifest's `api_version: "2022-11-28"`:
+
+```json
+{
+  "schema_version": 1,
+  "name": "github",
+  "default_version": "2022-11-28",
+  "versions": {
+    "2022-11-28": { "maturity": "beta" }
+  }
+}
+```
+
+Use lowercase connector names matching their directory and YAML `name`.
+Use the provider's API version identifier exactly: for example `v2`, `3.0`,
+`2022-11-28`, or `2026-07-29.dahlia`. Identifiers must start with an ASCII letter
+or digit and contain only ASCII letters, digits, dots, underscores, or hyphens.
+Every listed version must contain `manifest.yaml`, its YAML `api_version` must
+match that version, and every version directory must be listed in the registry.
+`default_version` must name a listed entry. For manifests without an API version,
+use the reserved directory and registry key `unversioned` and omit YAML
+`api_version`; do not invent a vendor `v1`.
+
+Maturity is per API version and must be `alpha`, `beta`, or `stable`.
+New connectors start at `alpha`. Display names, descriptions, logos,
+configuration, and API behavior stay in YAML. Invalid catalog entries stop
+startup with the failing file path. Run `go test ./connectors/http/... ./registry`
+before shipping. Embedded changes require rebuilding and deploying Filament.
+
+The catalog exposes keys such as `github@2022-11-28`, `attio@v2`, and
+`slack@unversioned`. The bare name `github` resolves `default_version` and appears
+alongside explicit API versions in catalog listings for existing CLI configurations.
+The connection creation API stores the selected concrete key even when given a
+bare name. Reapplying a local document with a bare connector name preserves an
+existing connection's pin. Previously stored bare names still follow the default;
+pin them before changing it when their API selection must remain unchanged.
+
+A new directory means support for another upstream API version. Manifest fixes
+or added resources for the same API stay in that API's directory; do not invent
+an API version for a Filament-side change. Such changes still need compatibility
+review because an API pin does not freeze the manifest contents. YAML `version: 1`
+remains the grammar version, and registry `schema_version: 1` remains the JSON
+format version. Neither changes when another upstream API version is added.
+Moving a pipeline between API versions may require checkpoint migration or reset;
+registration does not migrate state. Upgrade workers before creating connections
+with versioned keys that older workers cannot resolve.
+
+## Load a private catalog at startup
+
+Set `HTTP_MANIFESTS_DIR` to a directory on the worker's filesystem to load
+private manifests without rebuilding the binary. Every worker needs it: the
+persistent worker that answers connector calls and the workers that execute
+runs.
+
+```sh
+HTTP_MANIFESTS_DIR=/etc/filament/manifests ./worker -serve
+```
+
+The directory contains connector folders directly, using the same registry and
+API-version layout as bundled manifests:
+
+```text
+/etc/filament/manifests/
+  internal_crm/
+    registry.json
+    v3/manifest.yaml
+```
+
+Use `name: internal_crm` and `api_version: v3` in the manifest, and list `v3` in
+its registry. It becomes available as `internal_crm@v3` and through the
+`internal_crm` default alias. The same setting works with local CLI deployments,
+including `filament up` and direct runs. When using a remote CLI context, configure
+the directory on the deployment rather than on the CLI machine.
+
+Private catalogs can add connectors and API versions and change default aliases.
+They cannot replace an existing concrete registration: a private
+`github@2022-11-28` colliding with the bundled version fails startup. Adding a new
+API version and selecting it as the default leaves existing version pins intact.
+For a customized implementation of an existing API version, use a distinct
+connector name, such as `internal_github`, and create connections explicitly for
+that connector. API version identifiers must still match the upstream API.
+
+When unset, only the bundled catalog is used. An explicitly configured missing,
+empty, or invalid directory fails startup. Files are read and validated once;
+restart the process to pick up changes. A bad catalog is not partially registered.
+The process-wide bundled registry is left unchanged.
+
+In a split deployment, configure the directory on every worker: the persistent
+worker and the workers that execute runs. Each must receive the same files. The setting does not copy
+files between machines or mount volumes into worker pods;
+provision the files in each container or filesystem before startup. Private here
+means deployment-local, not tenant-specific: registered sources appear in the
+normal connector catalog for that deployment. Keep credentials in connection
+configuration and secret references rather than embedding them in manifests.
+Treat the directory and startup environment as trusted deployment configuration:
+private manifests control authentication and request destinations. Restrict write
+access to deployment administrators. Private version pins identify an API version;
+they do not freeze private manifest contents across restarts.
+
+For a custom Go host, `httpapi.LoadDirectory(path)` returns a private source
+registry. Combine it with `registry.DefaultSources.WithOverrides(private)` and
+pass the result to `app.WithSources` (or the server and runner directly).
 
 ## Start with the basic structure
 
@@ -22,6 +143,7 @@ how they fit together:
 version: 1
 name: github
 display_name: GitHub
+api_version: "2022-11-28"
 config:
   token:
     type: secret
@@ -85,12 +207,23 @@ are referenced elsewhere in the manifest as `config.<name>`.
   resolved once when the connector is configured, not separately for every
   request.
 - `auth` supports no auth, bearer tokens, a custom header, basic auth, and
-  OAuth 2 client credentials. OAuth tokens are cached. Query, HMAC, and chained
+  OAuth 2 client credentials or a supplied refresh token. OAuth tokens are
+  cached. Token URLs must resolve to HTTPS without userinfo or a fragment;
+  token requests never follow redirects. Replacement refresh tokens are kept
+  as opaque credentials for the authenticator's lifetime. They are not written
+  back to connection secrets, so providers that revoke old refresh tokens
+  require an updated configured secret before a new authenticator is created.
+  Query, HMAC, and chained
   authentication exist in the Go runtime but cannot currently be declared in
   YAML.
 - `rate_limit.requests_per_second` sets a shared limit for the connection. A
   `dynamic` block can adjust that limit from response headers using a Unix
   timestamp, seconds from now, or an HTTP date.
+- `rate_limit.responses` defines additional throttling rules. Each requires
+  `status`; optional `header` tests for presence and `header_value` for equality.
+  `body_path` (GJSON) and `body_contains` match a string case-insensitively. All
+  conditions in a rule must match. `backoff_seconds` sets the exponential
+  starting delay when `Retry-After` is absent; the longest matching delay wins.
 - `timeout_seconds` sets the request timeout and defaults to 60 seconds.
 
 ### Resources
@@ -114,7 +247,10 @@ Choose the pagination style that matches the API:
 - `next_url: <path>` (whole-URL envelopes like Django REST Framework)
 - `cursor {response, request: query.X|body.X|header.X, more, null_terminates}`
 - `offset {offset, limit, page_size}` (stops on a short page)
-- `page {number, size, page_size, total_pages}`
+- `page {number, size, page_size, total_pages, more}`. For JSON bodies, use
+  `body.<path>` for both `number` and `size`. Only `query.`, `body.`, and
+  `header.` act as prefixes, so a dotted parameter name like `pagination.page`
+  stays a query parameter as written.
 
 ### Read child endpoints
 
@@ -154,17 +290,333 @@ The lower bound remains fixed during one extraction. Filament saves the largest
 cursor value it sees. A missing or invalid cursor fails the run because skipping
 that value could cause later runs to miss records.
 
+For export feeds whose continuation survives between runs, use
+`response_cursor` instead of `cursor_field`:
+
+```yaml
+response:
+  records: $.data
+  pagination:
+    cursor:
+      response: continueFrom
+      request: query.from
+      more: hasMore
+      strict: true
+incremental:
+  response_cursor: continueFrom
+  start_param: from
+  inject_into: query
+  checkpoint_key: jobs_export_token
+```
+
+The response cursor must match cursor pagination's response path and request
+target. This mode requires a top-level resource and explicit records and `more`
+paths. Every page must contain an array of records, a Boolean `more` value, and
+a nonempty string token, including the terminal page. `strict: true` applies
+these checks to full reads too. Repeated continuation cycles fail extraction.
+The terminal token is committed after the complete run succeeds, even when no
+rows were returned. Failed runs replay from the previous committed token.
+Tokens are opaque: row comparators, cursor-column selection, and lookback windows
+are unavailable. Full reads do not seed incremental state. A change to the
+resource contract or non-secret connection configuration starts a fresh export.
+
+A nullable string field can derive a lexical maximum from an array:
+
+```yaml
+lastEventDate: { path: history, type: string, nullable: true, max_string: date }
+```
+
+`max_string` names an immediate child property on each array object. Missing,
+null, empty, non-string dates and non-object elements are ignored; an empty or
+missing array produces null. A non-array value fails projection. The original
+array is retained if projected separately, otherwise it remains in `raw`.
+
 ### Discovery and streaming
 
 `discovery` supports `mode: static | dynamic`, though every shipped manifest
 is static. A `stream` mode (`ndjson | sse | chunked_array`) exists per
 resource as an alternative to pagination. No shipped manifest uses it.
 
+For static discovery, `default_resources: [issues, comments]` sets the initial
+selection when creating a pipeline. All resources remain listed and selectable.
+Omit it to select all by default, or use `[]` to select none by default.
+
+### Asynchronous exports
+
+Use `mode: export` for a finite read that creates a job, waits for readiness,
+and downloads its result. Export requests live inside `export`; ordinary
+resource request, response, and pagination defaults do not apply. Connection
+authentication and headers apply to creation and status requests only.
+
+```yaml
+- name: exported_records
+  mode: export
+  primary_key: [id]
+  export:
+    start:
+      method: POST
+      path: /exports
+      body:
+        encoding: json
+        template: {dataset: records}
+      capture: {id: $.id}
+    wait:
+      type: job
+      request:
+        method: GET
+        path: /exports/{{ job.id }}
+      state:
+        path: $.status
+        pending: [queued, running]
+        ready: [completed]
+        failed: [failed, cancelled]
+      capture: {download_url: $.download_url}
+      interval_seconds: 10
+      timeout_seconds: 7200
+    result:
+      url: '{{ job.download_url }}'
+      allowed_hosts: [downloads.example.com]
+      auth: none
+      compression: gzip
+      format: ndjson
+  fields:
+    id: string
+    raw: {type: json, mode: remainder}
+```
+
+This example describes a hypothetical API. State values, paths, and file formats
+must match the provider's contract. Start templates accept `config`, `env`,
+`parent`, and `state` (the frozen incremental lower bound);
+status requests and the result URL also accept `job`, populated by captures.
+Captures select nonempty scalar values from the start response or ready status
+response. Unknown or missing job states fail the read.
+
+For APIs that return a file URL before it is ready, capture that URL in `start`
+and replace `wait` with:
+
+```yaml
+wait:
+  type: download
+  pending_statuses: [403]
+  interval_seconds: 10
+  timeout_seconds: 7200
+```
+
+Only explicitly listed statuses mean pending; supported choices are 202, 403,
+404, 409, and 425. For example, [Braze documents a 403](https://www.braze.com/docs/api/endpoints/export/user_data/post_users_segment)
+while a segment-export file is being prepared. Do not use that rule on an authenticated API status
+endpoint. Download 429 and 5xx responses use bounded retries. Job polling retries
+transient API failures separately from the pending-job loop. The deadline covers
+creation, polling, downloading, and decoding and remains fixed across recovery.
+
+`result` separates file compression, archive layout, and record encoding:
+
+| Setting | Values and behavior |
+|---|---|
+| `compression` | `none` (default) or `gzip`. |
+| `archive` | `none` (default), `zip`, or `tar`. ZIP cannot also declare gzip. |
+| `files` | Required for archives. A Go `path.Match` pattern over member names; `*` does not cross `/`. No matching files is an error. |
+| `format` | Required: `json` (an array), `ndjson` (one object per line), or `csv` (header row and string values). |
+| `records_path` | Optional dot path to an array inside a JSON document. Missing paths fail rather than producing an empty export. |
+| `csv` | Optional CSV dialect with `delimiter`, `header`, `columns`, and `quoting`, described below. |
+| `allowed_hosts` | Required exact download hostnames, without ports or wildcards. Checked on the initial HTTPS URL and every redirect. |
+| `auth` | Only `none` is supported. Downloads never inherit API authentication, connection headers, or cookies. |
+| `max_download_bytes` | Maximum downloaded bytes; default 1 GiB. |
+| `max_uncompressed_bytes` | Maximum decoded bytes across selected ZIP files, or the full gzip/tar stream; default 10 GiB. |
+
+JSON numbers retain their precision. Records are limited to 10 MiB. Archives
+are limited to 10,000 entries and cannot contain links or unsafe file paths.
+ZIP downloads use a temporary file, removed when the read ends; gzip and tar
+are processed as streams. CSV headers must be nonempty and unique.
+
+CSV defaults to commas, a header row, and standard double-quote handling. A
+`csv` block changes the dialect. This one reads a tab-separated file that has
+no header and never quotes its fields.
+
+```yaml
+result:
+  format: csv
+  csv:
+    delimiter: "\t"
+    header: false
+    columns: [GLOBALEVENTID, SQLDATE, Actor1Code]
+    quoting: none
+```
+
+`delimiter` is one character other than a double quote, CR, or LF. With
+`header: false`, `columns` names the fields in order and is required. Fields
+then map by these names exactly as they do by header names. `columns` is
+rejected when the file has a header. `quoting: none` splits each line on the
+delimiter and keeps quotes as data, for files that never quote but may contain
+a stray `"`. Every row must have as many fields as there are columns, and a
+short or long row fails the export.
+
+Batch-operation archives can contain envelopes rather than records. Add an
+`envelope` to require operation success and parse a JSON string inside each
+outer object:
+
+```yaml
+result:
+  url: '{{ job.download_url }}'
+  allowed_hosts: [storage.googleapis.com]
+  compression: gzip
+  archive: tar
+  files: '*.json'
+  format: json
+  envelope:
+    status_path: status_code
+    success: [200]
+    body_path: response
+    records_path: members
+```
+
+Here each archive member contains an array of operation envelopes; each
+`response` string must contain a `members` array. An operation error, corrupt
+archive, truncated document, or exceeded limit fails the export. Rows may
+already have reached the destination before that failure; completion is emitted
+only after all selected files validate.
+
+Exports support full and incremental reads, including parent fan-out. Add
+`for_each` (or `parent.resource`) and `export.parent_key` to create one job per
+parent. The key lists capture names that together uniquely identify a parent.
+Missing or duplicate keys fail before any jobs are created. `parent.concurrency`
+limits simultaneous jobs (default 5).
+
+For example, add the following settings to the export above, and include a
+`segments` index resource that captures `segment_id`:
+
+```yaml
+for_each: segments
+parent: {concurrency: 3}
+incremental:
+  cursor_field: updated_at
+  start_param: updated_since
+  inject_into: body
+  comparator: time
+  initial: '2026-01-01T00:00:00Z'
+  overlap_seconds: 300
+export:
+  parent_key: [segment_id]
+  start:
+    method: POST
+    path: /exports
+    body:
+      encoding: json
+      template: {segment_id: '{{ parent.segment_id }}'}
+    capture: {id: $.job_id}
+  # Keep wait and result from the complete example above.
+fields:
+  id: string
+  updated_at: timestamptz
+  segment_id: {type: string, path: parent.segment_id}
+  raw: {type: json, mode: remainder}
+```
+
+Each parent has its own watermark. The runtime injects the lower bound into
+the start request's query, header, or body using the ordinary `incremental`
+settings. The selected parents, captured values, incremental seed, and lookback
+are frozen before creation. Downloads may be unordered: the candidate
+watermark is the maximum observed cursor, and becomes eligible for the next run
+only after the entire artifact validates and the sink commits. An empty export
+retains its seed. There is no automatically generated upper time bound; verify
+that the provider's filter and snapshot semantics support this watermark model.
+
+Parent indexes and their ancestors must be finite full reads without incremental
+filters. A dedicated `capture_only` index is useful when the ordinary parent
+resource is incremental. Parent pagination restarts during recovery to rebuild
+captures. Once frozen, the job set remains unchanged even if that listing changes.
+New scheduled runs enumerate parents again, retaining watermarks for absent
+parents. State is limited to 10,000 historical parent keys and 16 MiB per resource.
+
+Record captures, `parent.since`, dynamic discovery from exports, and discovery
+scope injection into exports are rejected. One export emits one resource; multi-dataset routing,
+cloud-storage delivery without an HTTP URL, webhook completion, and automatic
+creation reconciliation are not implemented. Provider catalog manifests do not
+automatically switch to exports when this mode becomes available.
+
+Full-read checkpoints retain the job, deadline, and captured URLs. Interrupted
+reads resume a known job and replay its artifact from the beginning, so recovery
+is at-least-once. A job status request refreshes the download URL on resume; a
+403 or 410 download failure can trigger one further refresh. Download-only jobs
+cannot refresh expired URLs. For resources declaring a parent or an incremental
+block, retries replay every selected artifact, including completed jobs. Job
+snapshots are saved within the run separately from committed cross-run watermarks;
+an individual parent's completion does not advance durable progress after a
+failed run. Existing sink and ingestion-mode recovery policies still apply.
+Plain top-level full exports skip completed jobs on same-run resume. A fresh full
+read creates new jobs. Checkpoint identity binds the export to its manifest,
+base URL, and non-secret configuration. Planned scoped jobs rebuild their start
+request when it is sent, using the validated manifest, saved parent values,
+incremental seed, and lookback together with current runtime credentials and
+environment values. Checkpoints contain neither rendered start requests nor
+deferred request templates. Changes to the manifest or non-secret configuration
+invalidate checkpoint identity; environment values come from the current
+connector context. Rendered values are never evaluated as another template.
+Jobs with captured identities resume without rebuilding their creation request.
+
+Scoped checkpoints use a single version 1 format. Captured URLs and parent
+values still make checkpoint storage sensitive.
+
+For scoped recovery, expired waiting deadlines receive a new
+`wait.timeout_seconds` budget, including completed jobs replayed from a mixed
+checkpoint. Captures, frozen inputs, and committed watermarks are retained.
+This also applies when a saved attempt is resumed directly. A creation intent
+with an unknown outcome is never renewed or automatically resubmitted.
+
+Scoped exports publish creation intent and changed job captures eagerly.
+Unchanged post-poll snapshots are suppressed; completed jobs are folded into
+the next identity snapshot or flushed when extraction ends, including on error.
+Snapshots still contain the full parent set, so identity writes can remain
+quadratic in the number of parents. Batching reduces write volume while
+preserving the replay contract.
+
+Exports also report typed observational events through the source observer and
+runner: `export.job_created`, `export.job_polled`, and `export.job_ready`.
+Creation is reported only after the required captures validate. Poll reports
+count completed status requests (or artifact availability requests for download
+waiting), with the first report immediate and subsequent reports at most once
+every 30 seconds per job execution. Ready means the artifact is available;
+it does not mean rows have been decoded or the sink has committed. Direct
+downloads do not emit a creation event.
+
+Payloads include `correlationId`, cumulative `polls`, `elapsed` (nanoseconds),
+and `resumed`. Correlation IDs are randomly generated for each job execution
+and change on resume; counts and elapsed time restart for that execution.
+Events contain no upstream job IDs, parent values, captures, or signed URLs.
+Readiness is reported once per execution, even if an expired URL requires
+another status request. Events do not replace checkpoints or advance watermarks.
+
+After an artifact validates, `resource.page_fetched` reports both delivered
+records and downloaded artifact-body bytes actually read, before decompression
+or archive extraction. This works for chunked responses without `Content-Length`
+and counts nonzero artifact bytes even when there are no records. Counts are
+per artifact and exclude status requests and failed downloads. They describe
+source progress; authoritative sink byte totals still come from `batch.written`.
+
+Creation is attempted once, including when the API returns 202. A creation
+intent is queued before the request, then replaced with the captured job state.
+These pipeline checkpoint markers are asynchronous, so creation and checkpoint
+persistence are not an atomic transaction. A process crash before persistence
+can still lead to duplicate creation; provider idempotency or reconciliation is
+needed to eliminate that window. If recovery finds a creation intent without a
+job ID, extraction fails and requires upstream reconciliation before a fresh
+read. Signed URLs and captured parent values are sensitive
+checkpoint data. Signed URLs are omitted from transport errors.
+
+Include an ordinary top-level resource for connection testing. Export resources
+are excluded from probes so validating credentials cannot create a paid export.
+
 ## Runtime behavior
 
+The optional `connection.rate_limit.burst` bounds how many requests can start
+immediately when rate-limit capacity is available. Omit it to retain the
+default burst of twice `requests_per_second` (at least one). Set it to `1`
+for steady pacing. The limiter is shared by readers within one connector
+instance, including retries; separate runs do not share a budget.
+
 **Available modes.** Every manifest can run a full read. Incremental reads are
-available only when at least one resource has an `incremental` block, which is
-why Attio and Resend are full-only. The manifest chooses the cursor field; a
+available only when at least one resource has an `incremental` block, so a
+manifest without one is full-only. The manifest chooses the cursor field; a
 pipeline can change only its lookback window.
 
 **Resuming full reads.** Top-level resources checkpoint their pagination cursor
@@ -180,17 +632,42 @@ re-read the window and let an upsert write mode absorb the duplicates.
 
 **Retries and limits.** Responses are handled by status:
 
-- HTTP 429 is retried up to 10 attempts, honoring `Retry-After` capped at 60
-  seconds and reported as `pressure.rate_limited`
+- HTTP 429 and manifest-matched throttling responses are retried up to 10
+  attempts, honoring `Retry-After` and reported as `pressure.rate_limited`.
+  Only fallback exponential backoff is capped at 60 seconds.
+- HTTP 202 is polled within the same attempt budget when
+  `response.poll_pending: true`; exhaustion fails instead of emitting pending data.
+- HTTP 204 produces an empty result
 - 5xx responses are retried 3 times
-- other 4xx responses are fatal
+- other 4xx responses are fatal unless they match the resource's `response.empty` rule
+
+Some APIs return an error status when a collection is empty. A resource can
+recognize that response with an exact status and body match:
+
+```yaml
+response:
+  empty:
+    status: 404
+    body_path: errors
+    body_equals: [No calls found corresponding to the provided filters]
+```
+
+`status` must be a 4xx code. `body_path` uses dot-path syntax and must point to
+an array of strings. The entire array must equal `body_equals`, including case
+and order. Extra messages, a different status, or invalid JSON do not match.
+A match ends the page walk without emitting a row or advancing a watermark.
+Rows already read are kept. Throttling rules take precedence.
+
+Declare this rule on individual resources, not in `defaults`. Verify the API's
+actual response before adding a rule so an unrelated error cannot look like an
+empty collection.
 
 Responses are capped at 100 MB. Top-level resources extract concurrently,
 children after their parents.
 
 **Connection testing.** When a caller explicitly invokes the connector's
 `TestConnection` capability, it sends one request to the first top-level,
-non-streaming resource. Saving or validating a connection through the service
+non-streaming, non-export resource. Saving or validating a connection through the service
 API does not invoke this live test.
 
 **Manifest validation.** Loading a manifest reports all detectable problems
@@ -201,6 +678,15 @@ together. It checks:
 - defaults and shorthand expansion
 - semantic checks for cross-field rules such as parent cycles and unprojected
   cursor fields
+
+## API version
+
+`api_version` records the upstream API version the manifest was authored
+against. It is optional, since some APIs are unversioned, and free-form, since
+vendors use dates, semantic versions, or path segments. The catalog and the
+connection form show it. When the connection pins a version header such as
+`Stripe-Version` or `Notion-Version`, validation requires `api_version` to
+match its value.
 
 ## Maturity
 

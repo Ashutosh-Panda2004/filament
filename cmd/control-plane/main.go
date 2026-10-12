@@ -19,12 +19,13 @@ import (
 	"github.com/galaxy-io/filament/cmd/internal/dispatch"
 	"github.com/galaxy-io/filament/cmd/internal/health"
 	"github.com/galaxy-io/filament/eventbus"
+	"github.com/galaxy-io/filament/internal/modules/notifier"
 	"github.com/galaxy-io/filament/internal/modules/reaper"
 	"github.com/galaxy-io/filament/internal/modules/scheduler"
+	"github.com/galaxy-io/filament/internal/modules/streamsupervisor"
 	"github.com/galaxy-io/filament/internal/modules/tracker"
 	"github.com/galaxy-io/filament/module"
-
-	_ "github.com/galaxy-io/filament/cmd/internal/connectors"
+	"github.com/galaxy-io/filament/runner"
 )
 
 func main() {
@@ -40,11 +41,16 @@ func main() {
 }
 
 func run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	deps, closeDeps, err := boot.FromEnv(ctx)
 	if err != nil {
 		return err
 	}
 	defer closeDeps()
+	if deps.Worker, err = boot.RemoteWorker(); err != nil {
+		return err
+	}
 	log := deps.Log.With(
 		filament.Field{Key: "component", Value: "control-plane"},
 	)
@@ -61,22 +67,11 @@ func run(ctx context.Context) error {
 		},
 	)
 	healthState.Mount(healthMux)
-	healthAddr := os.Getenv("HEALTH_ADDR")
-	if healthAddr == "" {
-		healthAddr = ":8081"
-	}
+	healthAddr := healthAddress()
 	healthSrv := &http.Server{Addr: healthAddr, Handler: healthMux, ReadHeaderTimeout: 10 * time.Second}
 	healthErr := make(chan error, 1)
 	go func() { healthErr <- healthSrv.ListenAndServe() }()
-	defer func() {
-		healthState.MarkStopping()
-		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := healthSrv.Shutdown(shutCtx); err != nil {
-			log.Error("control-plane health server shutdown failed", err,
-				filament.Field{Key: "event.name", Value: "control_plane.health.shutdown_failed"})
-		}
-	}()
+	defer shutdownHealth(healthSrv, healthState, log)
 
 	eventBus, closeBus, err := boot.Bus()
 	if err != nil {
@@ -93,29 +88,26 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("datastore %q does not support schedules", deps.Store.Name())
 	}
 	sched := scheduler.New(scheduleStore)
-	mods := []module.Module{tracker.New(), dispatcher, sched}
-	// The reaper mounts only under kubernetes dispatch: staleness means death
-	// only where heartbeats exist, and inproc runs don't emit them. The
-	// workload probe holds kills for workers that are up but silent and for
-	// Requested runs that were never dispatched.
-	var reap *reaper.Module
-	if prober, ok := dispatcher.(interface {
-		Workload(context.Context, filament.RunID) (filament.Workload, error)
-	}); ok {
-		reap = reaper.NewFromEnv(reaper.WithWorkloadProbe(prober.Workload))
-		mods = append(mods, reap)
-	}
+	mods, reap := controlModules(sched, dispatcher)
 	h, err := boot.Mount(ctx, deps, eventBus, mods...)
 	if err != nil {
 		return err
 	}
 	defer func() {
+		cancel()
 		if err := h.Close(); err != nil {
 			log.Warn("control-plane host close failed",
 				filament.Field{Key: "event.name", Value: "control_plane.host.close_failed"},
 				filament.Field{Key: "error", Value: err.Error()})
 		}
 	}()
+	// Continuous attempts are dispatched like runs; without a dispatcher the
+	// long-lived worker supervises them itself.
+	if remote, ok := dispatcher.(filament.Dispatcher); ok {
+		streams := streamsupervisor.New(runner.Deps{Bus: eventBus, DataStore: deps.Store, StreamStore: deps.StreamStore, Secrets: deps.Secrets, Log: deps.Log}, remote)
+		streams.Start(ctx)
+		defer streams.Close()
+	}
 	sched.Start(ctx)
 	if reap != nil {
 		reap.Start(ctx)
@@ -143,4 +135,42 @@ func run(ctx context.Context) error {
 		}
 		return fmt.Errorf("control-plane health server: %w", err)
 	}
+}
+
+func shutdownHealth(srv *http.Server, state *health.State, log filament.Logger) {
+	state.MarkStopping()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Error("control-plane health server shutdown failed", err,
+			filament.Field{Key: "event.name", Value: "control_plane.health.shutdown_failed"})
+	}
+}
+
+func healthAddress() string {
+	if addr := os.Getenv("HEALTH_ADDR"); addr != "" {
+		return addr
+	}
+	return ":8081"
+}
+
+// controlModules assembles the control plane's modules around the dispatcher,
+// which is nil under worker dispatch. The reaper mounts only under kubernetes
+// dispatch: staleness means death only where heartbeats exist, and a
+// long-lived worker's runs don't emit them. The workload probe holds kills for
+// workers that are up but silent and for Requested runs that were never
+// dispatched.
+func controlModules(sched *scheduler.Module, dispatcher module.Module) ([]module.Module, *reaper.Module) {
+	mods := []module.Module{tracker.New(), sched, notifier.New()}
+	if dispatcher != nil {
+		mods = append(mods, dispatcher)
+	}
+	prober, ok := dispatcher.(interface {
+		Workload(context.Context, filament.RunID) (filament.Workload, error)
+	})
+	if !ok {
+		return mods, nil
+	}
+	reap := reaper.NewFromEnv(reaper.WithWorkloadProbe(prober.Workload))
+	return append(mods, reap), reap
 }

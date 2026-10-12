@@ -17,6 +17,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math/big"
 	"slices"
 	"strconv"
 	"strings"
@@ -235,17 +236,13 @@ func keyShardsFrom(table, qualified string, dec *rowDecoder, ks keysetPlan) ([]k
 	return out, nil
 }
 
-// extractKeysetShard pages one shard out through the sink: WHERE (pk-tuple) is above
+// extractKeysetShard pages one shard out through w: WHERE (pk-tuple) is above
 // the cursor (or the shard's lower bound) and below the shard's upper bound, ORDER BY
 // the key, LIMIT a page. Every row carries its key so the pipeline can carry the
 // cursor forward. Rows append while the result set is open; the shard's connection
 // is dedicated for its whole life (withSnapshotTx), so a stall on backpressure
 // holds nothing extra.
-func (s *Source) extractKeysetShard(ctx context.Context, sink arrowbatch.Inlet, q querier, sh keyShard, limit int) error {
-	w, err := sink.Builder(sh.table, sh.part, sh.dec.schema)
-	if err != nil {
-		return err
-	}
+func (s *Source) extractKeysetShard(ctx context.Context, w arrowbatch.RowWriter, q querier, sh keyShard, limit int) error {
 	order := keysetOrder(sh.pks)
 
 	// Every page after the first filters by the full-tuple cursor, so its SQL
@@ -514,10 +511,16 @@ func intBoundaries(lo, hi int64, k int) []string {
 	if k <= 1 || hi <= lo {
 		return nil
 	}
-	span := hi - lo + 1
+	// big.Int, because i*span overflows int64 for wide keys (snowflake-style IDs), and
+	// wrapped boundaries would make the last shard overlap the others.
+	span := new(big.Int).Sub(big.NewInt(hi), big.NewInt(lo))
+	span.Add(span, big.NewInt(1))
 	bounds := make([]string, 0, k-1)
 	for i := 1; i < k; i++ {
-		bounds = append(bounds, strconv.FormatInt(lo+int64(i)*span/int64(k), 10))
+		b := new(big.Int).Mul(span, big.NewInt(int64(i)))
+		b.Quo(b, big.NewInt(int64(k)))
+		b.Add(b, big.NewInt(lo))
+		bounds = append(bounds, b.String())
 	}
 	return bounds
 }

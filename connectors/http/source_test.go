@@ -19,7 +19,7 @@ import (
 	"github.com/galaxy-io/filament/checkpoint"
 	"github.com/galaxy-io/filament/connectors/http/manifest"
 	"github.com/galaxy-io/filament/connectors/http/pagination"
-	"github.com/galaxy-io/filament/connectors/internal/ndjson"
+	jsonencoder "github.com/galaxy-io/filament/connectors/internal/json"
 	"github.com/galaxy-io/filament/rowmodel"
 )
 
@@ -430,7 +430,7 @@ func TestSourcePlanResourcesExpandsSelectedNotionDatabase(t *testing.T) {
 
 func TestSourcePlanResourcesKeepsSingleStaticResource(t *testing.T) {
 	ctx := context.Background()
-	src := NewAttio()
+	src := catalogSource(t, "attio@v2")
 	if err := src.Configure(ctx, filament.NewConfig(map[string]any{
 		"api_key": "test-token",
 	})); err != nil {
@@ -589,11 +589,11 @@ func TestSourceNotionHTTPAPIManifestDiscoverAndExtractSelectedDatabase(t *testin
 	}
 }
 
-func TestNewNotionSpecHidesManifestPath(t *testing.T) {
+func TestCatalogNotionSpecHidesManifestPath(t *testing.T) {
 	ctx := context.Background()
-	src := NewNotion()
+	src := catalogSource(t, "notion@2022-06-28")
 	spec := src.Spec()
-	if spec.Name != "notion" {
+	if spec.Name != "notion@2022-06-28" {
 		t.Fatalf("name = %q, want notion", spec.Name)
 	}
 	if spec.DisplayName != "Notion" {
@@ -633,20 +633,20 @@ func TestEmbeddedCatalogMetadata(t *testing.T) {
 		source                                 *Source
 	}{
 		{
-			name: "github", source: NewGitHub(),
-			description: "Code hosting platform for version control, collaboration, and software development workflows.",
+			name: "github", source: catalogSource(t, "github@2022-11-28"),
+			description: "Software development platform for hosting Git repositories, reviewing code, and collaborating on projects from planning through deployment.",
 			darkLogo:    "https://cdn.getgalaxy.io/sources/source-icon-github-dark.svg",
 			lightLogo:   "https://cdn.getgalaxy.io/sources/source-icon-github-light.svg",
 		},
 		{
-			name: "slack", source: NewSlack(),
-			description: "Messaging and collaboration platform designed for teams to communicate and work together efficiently.",
+			name: "slack", source: catalogSource(t, "slack@unversioned"),
+			description: "Collaboration platform that brings team conversations, shared information, and tools together in searchable channels organized around projects and work.",
 			darkLogo:    "https://cdn.getgalaxy.io/sources/source-icon-slack-dark.svg",
 			lightLogo:   "https://cdn.getgalaxy.io/sources/source-icon-slack-light.svg",
 		},
 		{
-			name: "attio", source: NewAttio(),
-			description: "CRM platform designed for modern teams to centralize customer data, pipelines, and workflows.",
+			name: "attio", source: catalogSource(t, "attio@v2"),
+			description: "CRM for go-to-market teams, with a flexible data model that can be tailored to how each business manages customer relationships.",
 			darkLogo:    "https://cdn.getgalaxy.io/sources/source-icon-attio-dark.svg",
 			lightLogo:   "https://cdn.getgalaxy.io/sources/source-icon-attio-light.svg",
 		},
@@ -663,11 +663,11 @@ func TestEmbeddedCatalogMetadata(t *testing.T) {
 	}
 }
 
-func TestNewAttioSpecAndEmbeddedManifest(t *testing.T) {
+func TestCatalogAttioSpecAndEmbeddedManifest(t *testing.T) {
 	ctx := context.Background()
-	src := NewAttio()
+	src := catalogSource(t, "attio@v2")
 	spec := src.Spec()
-	if spec.Name != "attio" || spec.DisplayName != "Attio" {
+	if spec.Name != "attio@v2" || spec.DisplayName != "Attio" {
 		t.Fatalf("spec identity = %q/%q, want attio/Attio", spec.Name, spec.DisplayName)
 	}
 	if len(spec.Config.Fields) != 1 {
@@ -724,7 +724,7 @@ func TestAttioUsesAPIKeyAsBearerToken(t *testing.T) {
 	}))
 	defer api.Close()
 
-	manifestData := []byte(strings.Replace(string(attioManifest), "https://api.attio.com", api.URL, 1))
+	manifestData := []byte(strings.Replace(string(catalogManifest(t, "attio", "v2")), "https://api.attio.com", api.URL, 1))
 	src := NewManifest(manifestData)
 	if err := src.Configure(ctx, filament.NewConfig(map[string]any{"api_key": "attio-key"})); err != nil {
 		t.Fatalf("configure: %v", err)
@@ -746,7 +746,7 @@ func TestAttioUsesAPIKeyAsBearerToken(t *testing.T) {
 func TestSlackEmbeddedManifestAndMessageFanOut(t *testing.T) {
 	ctx := context.Background()
 	schemaFields := map[string]filament.ConfigField{}
-	for _, field := range NewSlack().Spec().Config.Fields {
+	for _, field := range catalogSource(t, "slack@unversioned").Spec().Config.Fields {
 		schemaFields[field.Name] = field
 	}
 	conversationTypesField := schemaFields["conversation_types"]
@@ -780,7 +780,7 @@ func TestSlackEmbeddedManifestAndMessageFanOut(t *testing.T) {
 	}))
 	defer api.Close()
 
-	manifestData := []byte(strings.Replace(string(slackManifest), "https://slack.com/api", api.URL, 1))
+	manifestData := []byte(strings.Replace(string(catalogManifest(t, "slack", "unversioned")), "https://slack.com/api", api.URL, 1))
 	src := NewManifest(manifestData)
 	if err := src.Configure(ctx, filament.NewConfig(map[string]any{"token": "xoxb-test"})); err != nil {
 		t.Fatalf("configure: %v", err)
@@ -990,11 +990,11 @@ func TestManifestPathIsLoadedOncePerConnector(t *testing.T) {
 	}
 }
 
-func TestNewGitHubSpecAndEmbeddedManifest(t *testing.T) {
+func TestCatalogGitHubSpecAndEmbeddedManifest(t *testing.T) {
 	ctx := context.Background()
-	src := NewGitHub()
+	src := catalogSource(t, "github@2022-11-28")
 	spec := src.Spec()
-	if spec.Name != "github" || spec.DisplayName != "GitHub" {
+	if spec.Name != "github@2022-11-28" || spec.DisplayName != "GitHub" {
 		t.Fatalf("spec identity = %q/%q, want github/GitHub", spec.Name, spec.DisplayName)
 	}
 	if len(spec.Config.Fields) != 2 {
@@ -1022,7 +1022,30 @@ func TestNewGitHubSpecAndEmbeddedManifest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discover: %v", err)
 	}
-	want := []string{"repositories", "issues", "pull_requests"}
+	wantEnabled := []string{
+		"repositories", "issues", "pull_requests", "repository_details", "star_history",
+		"forks", "issue_comments", "pull_request_review_comments", "labels", "milestones",
+		"contributors", "languages",
+	}
+	var enabled []string
+	for _, resource := range discovered.Resources {
+		if resource.Metadata["default_resources"] == "true" {
+			enabled = append(enabled, resource.Name)
+		}
+	}
+	if !slices.Equal(enabled, wantEnabled) {
+		t.Fatalf("default enabled = %v, want %v", enabled, wantEnabled)
+	}
+	want := []string{
+		"repositories", "issues", "pull_requests", "repository_details", "stargazers", "watchers", "star_history", "star_count", "forks",
+		"issue_comments", "pull_request_review_comments", "pull_request_reviews", "labels", "milestones", "releases", "release_assets", "issue_events",
+		"issue_reactions", "issue_comment_reactions", "pull_request_review_comment_reactions",
+		"branches", "tags", "commits", "contributors", "languages", "members", "teams", "team_members", "collaborators", "workflows", "workflow_runs", "workflow_jobs", "deployments", "deployment_statuses", "traffic_views", "traffic_clones", "traffic_referrers", "traffic_paths",
+		"projects", "project_fields", "project_items", "project_item_field_values", "dependabot_alerts", "code_scanning_alerts", "secret_scanning_alerts",
+		"discussions", "discussion_comments", "discussion_replies",
+		"pull_request_files", "repository_events", "commit_activity", "code_frequency", "contributor_statistics", "participation", "punch_card", "anonymous_contributors",
+		"issue_timeline",
+	}
 	if len(discovered.Resources) != len(want) {
 		t.Fatalf("resources = %#v, want %v", discovered.Resources, want)
 	}
@@ -1395,19 +1418,20 @@ type testRecord struct {
 // collectSink is an Arrow inlet that renders every flushed row back to
 // a testRecord.
 type collectSink struct {
-	records []testRecord
+	checkpoints map[string][]string
+	records     []testRecord
 }
 
 func (s *collectSink) Builder(resource string, _ int, schema rowmodel.Schema) (arrowbatch.RowWriter, error) {
 	as := arrowbatch.Schema(schema)
-	return arrowbatch.NewBuilder(as, nil, arrowbatch.Options{MaxRows: 1}, &collectChunks{sink: s, resource: resource, pk: schema.PrimaryKey, enc: ndjson.NewEncoder(as)}), nil
+	return arrowbatch.NewBuilder(as, nil, arrowbatch.Options{MaxRows: 1}, &collectChunks{sink: s, resource: resource, pk: schema.PrimaryKey, enc: jsonencoder.NewEncoder(as)}), nil
 }
 
 type collectChunks struct {
 	sink     *collectSink
 	resource string
 	pk       []string
-	enc      *ndjson.Encoder
+	enc      *jsonencoder.Encoder
 }
 
 func (c *collectChunks) Chunk(ch *arrowbatch.Batch) error {
@@ -1425,7 +1449,13 @@ func (c *collectChunks) Chunk(ch *arrowbatch.Batch) error {
 	return nil
 }
 
-func (c *collectChunks) Drained(rowmodel.Meta, int) error { return nil }
+func (c *collectChunks) Drained(meta rowmodel.Meta, _ int) error {
+	if c.sink.checkpoints == nil {
+		c.sink.checkpoints = map[string][]string{}
+	}
+	c.sink.checkpoints[c.resource] = meta.Key
+	return nil
+}
 
 func writeTestManifest(t *testing.T, baseURL string) string {
 	t.Helper()
@@ -1499,7 +1529,7 @@ resources:
 func writeLinearTestManifest(t *testing.T, baseURL string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "linear.yaml")
-	data := strings.Replace(string(linearManifest), "https://api.linear.app", baseURL, 1)
+	data := strings.Replace(string(catalogManifest(t, "linear", "unversioned")), "https://api.linear.app", baseURL, 1)
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatalf("write linear manifest: %v", err)
 	}
@@ -1515,6 +1545,7 @@ display_name: Notion
 description: Test Notion connector.
 dark_logo_url: https://cdn.example.com/notion-dark.svg
 light_logo_url: https://cdn.example.com/notion-light.svg
+api_version: "2022-06-28"
 connection:
   base_url: %s
   auth:
@@ -1589,11 +1620,11 @@ discovery:
 	return path
 }
 
-func TestNewResendSpecAndEmbeddedManifest(t *testing.T) {
+func TestCatalogResendSpecAndEmbeddedManifest(t *testing.T) {
 	ctx := context.Background()
-	src := NewResend()
+	src := catalogSource(t, "resend@unversioned")
 	spec := src.Spec()
-	if spec.Name != "resend" || spec.DisplayName != "Resend" {
+	if spec.Name != "resend@unversioned" || spec.DisplayName != "Resend" {
 		t.Fatalf("spec identity = %q/%q, want resend/Resend", spec.Name, spec.DisplayName)
 	}
 	fields := map[string]filament.ConfigField{}
@@ -1670,7 +1701,7 @@ func TestResendPaginatesOnLastRecordIDAndSendsBearerToken(t *testing.T) {
 	}))
 	defer api.Close()
 
-	manifestData := []byte(strings.Replace(string(resendManifest), "https://api.resend.com", api.URL, 1))
+	manifestData := []byte(strings.Replace(string(catalogManifest(t, "resend", "unversioned")), "https://api.resend.com", api.URL, 1))
 	src := NewManifest(manifestData)
 	if err := src.Configure(ctx, filament.NewConfig(map[string]any{"api_key": "re_test_123"})); err != nil {
 		t.Fatalf("configure: %v", err)
@@ -1726,7 +1757,7 @@ func TestResendTestConnectionProbesEmails(t *testing.T) {
 	}))
 	defer api.Close()
 
-	manifestData := []byte(strings.Replace(string(resendManifest), "https://api.resend.com", api.URL, 1))
+	manifestData := []byte(strings.Replace(string(catalogManifest(t, "resend", "unversioned")), "https://api.resend.com", api.URL, 1))
 	src := NewManifest(manifestData)
 	if err := src.TestConnection(context.Background(), filament.NewConfig(map[string]any{
 		"api_key": "re_test_123",
@@ -1763,7 +1794,7 @@ func TestResendEmailDetailsSingletonFanOutSendsNoListParams(t *testing.T) {
 	}))
 	defer api.Close()
 
-	manifestData := []byte(strings.Replace(string(resendManifest), "https://api.resend.com", api.URL, 1))
+	manifestData := []byte(strings.Replace(string(catalogManifest(t, "resend", "unversioned")), "https://api.resend.com", api.URL, 1))
 	src := NewManifest(manifestData)
 	if err := src.Configure(ctx, filament.NewConfig(map[string]any{"api_key": "re_test_123"})); err != nil {
 		t.Fatalf("configure: %v", err)
@@ -1822,7 +1853,7 @@ func TestResendDomainRecordsProjectNestedArrayFromDomainDetail(t *testing.T) {
 	}))
 	defer api.Close()
 
-	manifestData := []byte(strings.Replace(string(resendManifest), "https://api.resend.com", api.URL, 1))
+	manifestData := []byte(strings.Replace(string(catalogManifest(t, "resend", "unversioned")), "https://api.resend.com", api.URL, 1))
 	src := NewManifest(manifestData)
 	if err := src.Configure(ctx, filament.NewConfig(map[string]any{"api_key": "re_test_123"})); err != nil {
 		t.Fatalf("configure: %v", err)
@@ -1905,7 +1936,7 @@ func TestResendWebhookAttemptsInheritWebhookIDThroughEventCapture(t *testing.T) 
 	}))
 	defer api.Close()
 
-	manifestData := []byte(strings.Replace(string(resendManifest), "https://api.resend.com", api.URL, 1))
+	manifestData := []byte(strings.Replace(string(catalogManifest(t, "resend", "unversioned")), "https://api.resend.com", api.URL, 1))
 	src := NewManifest(manifestData)
 	if err := src.Configure(ctx, filament.NewConfig(map[string]any{"api_key": "re_test_123"})); err != nil {
 		t.Fatalf("configure: %v", err)
@@ -1972,7 +2003,7 @@ func TestResendTemplateDetailsAcceptArrayReplyTo(t *testing.T) {
 	}))
 	defer api.Close()
 
-	manifestData := []byte(strings.Replace(string(resendManifest), "https://api.resend.com", api.URL, 1))
+	manifestData := []byte(strings.Replace(string(catalogManifest(t, "resend", "unversioned")), "https://api.resend.com", api.URL, 1))
 	src := NewManifest(manifestData)
 	if err := src.Configure(ctx, filament.NewConfig(map[string]any{"api_key": "re_test_123"})); err != nil {
 		t.Fatalf("configure: %v", err)
@@ -2002,11 +2033,11 @@ func TestResendTemplateDetailsAcceptArrayReplyTo(t *testing.T) {
 	}
 }
 
-func TestNewStripeSpecAndEmbeddedManifest(t *testing.T) {
+func TestCatalogStripeSpecAndEmbeddedManifest(t *testing.T) {
 	ctx := context.Background()
-	src := NewStripe()
+	src := catalogSource(t, "stripe@2026-07-29.dahlia")
 	spec := src.Spec()
-	if spec.Name != "stripe" || spec.DisplayName != "Stripe" {
+	if spec.Name != "stripe@2026-07-29.dahlia" || spec.DisplayName != "Stripe" {
 		t.Fatalf("spec identity = %q/%q, want stripe/Stripe", spec.Name, spec.DisplayName)
 	}
 	fields := map[string]filament.ConfigField{}
@@ -2090,7 +2121,7 @@ func TestStripePaginatesOnLastRecordIDAndSendsBasicAuth(t *testing.T) {
 	}))
 	defer api.Close()
 
-	manifestData := []byte(strings.Replace(string(stripeManifest), "https://api.stripe.com", api.URL, 1))
+	manifestData := []byte(strings.Replace(string(catalogManifest(t, "stripe", "2026-07-29.dahlia")), "https://api.stripe.com", api.URL, 1))
 	src := NewManifest(manifestData)
 	if err := src.Configure(ctx, filament.NewConfig(map[string]any{"api_key": "rk_test_123"})); err != nil {
 		t.Fatalf("configure: %v", err)
@@ -2168,7 +2199,7 @@ func TestStripeSubscriptionItemFanOut(t *testing.T) {
 	}))
 	defer api.Close()
 
-	manifestData := []byte(strings.Replace(string(stripeManifest), "https://api.stripe.com", api.URL, 1))
+	manifestData := []byte(strings.Replace(string(catalogManifest(t, "stripe", "2026-07-29.dahlia")), "https://api.stripe.com", api.URL, 1))
 	src := NewManifest(manifestData)
 	if err := src.Configure(ctx, filament.NewConfig(map[string]any{"api_key": "rk_test_123"})); err != nil {
 		t.Fatalf("configure: %v", err)
@@ -2237,7 +2268,7 @@ func TestStripeInvoiceLineItemFanOut(t *testing.T) {
 	}))
 	defer api.Close()
 
-	manifestData := []byte(strings.Replace(string(stripeManifest), "https://api.stripe.com", api.URL, 1))
+	manifestData := []byte(strings.Replace(string(catalogManifest(t, "stripe", "2026-07-29.dahlia")), "https://api.stripe.com", api.URL, 1))
 	src := NewManifest(manifestData)
 	if err := src.Configure(ctx, filament.NewConfig(map[string]any{"api_key": "rk_test_123"})); err != nil {
 		t.Fatalf("configure: %v", err)
@@ -2300,7 +2331,7 @@ func TestStripeIncrementalInjectsBracketedCreatedFilter(t *testing.T) {
 	}))
 	defer api.Close()
 
-	manifestData := []byte(strings.Replace(string(stripeManifest), "https://api.stripe.com", api.URL, 1))
+	manifestData := []byte(strings.Replace(string(catalogManifest(t, "stripe", "2026-07-29.dahlia")), "https://api.stripe.com", api.URL, 1))
 	src := NewManifest(manifestData)
 	if err := src.Configure(ctx, filament.NewConfig(map[string]any{"api_key": "rk_test_123"})); err != nil {
 		t.Fatalf("configure: %v", err)
@@ -2362,7 +2393,7 @@ func TestStripeTestConnectionProbesCustomers(t *testing.T) {
 	}))
 	defer api.Close()
 
-	manifestData := []byte(strings.Replace(string(stripeManifest), "https://api.stripe.com", api.URL, 1))
+	manifestData := []byte(strings.Replace(string(catalogManifest(t, "stripe", "2026-07-29.dahlia")), "https://api.stripe.com", api.URL, 1))
 	src := NewManifest(manifestData)
 	if err := src.TestConnection(context.Background(), filament.NewConfig(map[string]any{
 		"api_key": "rk_test_123",
@@ -2383,25 +2414,25 @@ func TestStripeTestConnectionProbesCustomers(t *testing.T) {
 func unthrottledPostHogManifest(t *testing.T) []byte {
 	t.Helper()
 	const throttled = "requests_per_second: 0.3"
-	if !strings.Contains(string(posthogManifest), throttled) {
+	if !strings.Contains(string(catalogManifest(t, "posthog", "unversioned")), throttled) {
 		t.Fatalf("manifest no longer contains %q — update the test helper", throttled)
 	}
-	return []byte(strings.Replace(string(posthogManifest), throttled, "requests_per_second: 1000", 1))
+	return []byte(strings.Replace(string(catalogManifest(t, "posthog", "unversioned")), throttled, "requests_per_second: 1000", 1))
 }
 
-func TestNewPostHogSpecAndEmbeddedManifest(t *testing.T) {
+func TestCatalogPostHogSpecAndEmbeddedManifest(t *testing.T) {
 	ctx := context.Background()
-	src := NewPostHog()
+	src := catalogSource(t, "posthog@unversioned")
 	spec := src.Spec()
-	if spec.Name != "posthog" || spec.DisplayName != "PostHog" {
+	if spec.Name != "posthog@unversioned" || spec.DisplayName != "PostHog" {
 		t.Fatalf("spec identity = %q/%q, want posthog/PostHog", spec.Name, spec.DisplayName)
 	}
 	fields := map[string]filament.ConfigField{}
 	for _, field := range spec.Config.Fields {
 		fields[field.Name] = field
 	}
-	if len(fields) != 3 {
-		t.Fatalf("config fields = %#v, want api_key, project_id and host", spec.Config.Fields)
+	if len(fields) != 4 {
+		t.Fatalf("config fields = %#v, want api_key, project_id, host and session_recordings_start_date", spec.Config.Fields)
 	}
 	if fields["api_key"].Type != filament.FieldSecret || !fields["api_key"].Required {
 		t.Fatalf("api_key field = %#v, want required secret", fields["api_key"])
@@ -2433,14 +2464,82 @@ func TestNewPostHogSpecAndEmbeddedManifest(t *testing.T) {
 		t.Fatalf("discover: %v", err)
 	}
 	want := []string{
-		"persons", "events", "cohorts", "feature_flags", "experiments",
-		"insights", "dashboards", "actions", "annotations", "surveys",
+		"actions",
+		"activity_log",
+		"alerts",
+		"annotations",
+		"batch_export_backfills",
+		"batch_export_runs",
+		"batch_exports",
+		"cohort_members",
+		"cohorts",
+		"dashboard_templates",
+		"dashboards",
+		"dataset_item_versions",
+		"dataset_item_versions_archived",
+		"dataset_items",
+		"dataset_items_archived",
+		"dataset_revisions",
+		"dataset_revisions_archived",
+		"datasets",
+		"datasets_archived",
+		"early_access_features",
+		"endpoint_versions",
+		"endpoints",
+		"error_tracking_alerts",
+		"error_tracking_assignment_rules",
+		"error_tracking_bypass_rules",
+		"error_tracking_external_references",
+		"error_tracking_fingerprints",
+		"error_tracking_grouping_rules",
+		"error_tracking_issues",
+		"error_tracking_releases",
+		"error_tracking_severity_rules",
+		"error_tracking_spike_events",
+		"error_tracking_stack_frames",
+		"error_tracking_suppression_rules",
+		"error_tracking_symbol_sets",
+		"evaluations",
+		"event_definitions",
+		"event_property_definitions",
+		"experiments",
+		"experiments_archived",
+		"feature_flags",
+		"feature_flags_archived",
+		"file_download_batch_exports",
+		"group_property_definitions",
+		"group_types",
+		"groups",
+		"hog_functions",
+		"insights",
+		"llm_clustering_jobs",
+		"llm_evaluation_report_runs",
+		"llm_evaluation_reports",
+		"llm_parser_recipes",
+		"llm_prompts",
+		"llm_review_queue_items",
+		"llm_review_queues",
+		"llm_score_definitions",
+		"llm_trace_reviews",
+		"notebooks",
+		"person_property_definitions",
+		"persons",
+		"session_property_definitions",
+		"session_recording_playlists",
 		"session_recordings",
+		"subscription_deliveries",
+		"subscriptions",
+		"survey_responses",
+		"surveys",
 	}
 	if len(discovered.Resources) != len(want) {
 		t.Fatalf("resources = %d, want %d", len(discovered.Resources), len(want))
 	}
+	defaults := []string{"actions", "annotations", "cohort_members", "cohorts", "dashboards", "experiments", "feature_flags", "groups", "insights", "notebooks", "persons", "session_recordings", "surveys"}
 	for i, name := range want {
+		if (discovered.Resources[i].Metadata["default_resources"] == "true") != slices.Contains(defaults, name) {
+			t.Fatalf("unexpected default selection: %s", name)
+		}
 		if discovered.Resources[i].Name != name {
 			t.Fatalf("resource[%d] = %q, want %q", i, discovered.Resources[i].Name, name)
 		}
@@ -2540,132 +2639,724 @@ func TestPostHogPaginatesViaNextURLAndScopesToProject(t *testing.T) {
 	}
 }
 
-func TestPostHogEventsIncrementalInjectsAfterMinusOverlap(t *testing.T) {
-	ctx := context.Background()
-	var gotAfter string
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/projects/12345/events/" {
-			http.NotFound(w, r)
-			return
-		}
-		gotAfter = r.URL.Query().Get("after")
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"next":null,"results":[
-			{"id":"01890a5d-0000-0000-0000-000000000001","event":"$pageview","distinct_id":"ada",
-			 "timestamp":"2026-08-01T15:00:00Z","properties":{"$browser":"Chrome"},
-			 "person":null,"elements":[],"elements_chain":""}]}`)
-	}))
-	defer api.Close()
-
-	src := NewManifest(posthogManifest)
-	if err := src.Configure(ctx, filament.NewConfig(map[string]any{
-		"api_key":    "phx_test_123",
-		"project_id": "12345",
-		"host":       api.URL,
-	})); err != nil {
-		t.Fatalf("configure: %v", err)
-	}
-	defer src.Teardown(ctx)
-
-	// events and insights each declare their own checkpoint key; the
-	// cursor_field fallback would not collide here, but naming them keeps the
-	// stored key stable if either cursor field is ever renamed.
-	prev := map[string]filament.Checkpoint{
-		"events": checkpoint.KeysetCheckpoint{
-			Mode:   checkpoint.ModeIncremental,
-			Cols:   []string{"events_timestamp"},
-			Types:  []string{"timestamptz"},
-			Shards: []checkpoint.KeysetShard{{Key: []string{"2026-08-01T12:00:00Z"}}},
-		}.ToCheckpoint("events"),
-	}
-	plan, err := src.PlanIncremental(ctx, []string{"events"}, prev, map[string]filament.ResourceCursorConfig{
-		"events": {Field: "timestamp"},
-	})
-	if err != nil {
-		t.Fatalf("plan incremental: %v", err)
-	}
-	ks, ok := checkpoint.ParseKeyset(plan["events"])
-	if !ok {
-		t.Fatal("plan did not parse as keyset")
-	}
-	if got, want := ks.Cols, []string{"events_timestamp"}; !slices.Equal(got, want) {
-		t.Fatalf("checkpoint cols = %v, want durable watermark only %v", got, want)
-	}
-	var sink collectSink
-	if err := src.ExtractFrom(ctx, &sink, filament.ExtractOpts{Resources: []string{"events"}, Parallelism: 1}, plan); err != nil {
-		t.Fatalf("extract from: %v", err)
-	}
-
-	// overlap_seconds: 3600 rewinds the stored watermark an hour, because
-	// buffered SDKs deliver events well behind their own timestamps.
-	if gotAfter != "2026-08-01T11:00:00Z" {
-		t.Fatalf("after = %q, want the stored watermark rewound by the overlap window", gotAfter)
-	}
-	if len(sink.records) != 1 {
-		t.Fatalf("records = %d, want the single event past the watermark", len(sink.records))
-	}
-}
-
 // Regression test. The watermark advances per record as a page streams, so
 // re-applying it to a server-issued next URL would narrow the range out from
-// under PostHog's own bounds: on a newest-first feed page two would come back
+// under the server's own bounds: on a newest-first feed page two would come back
 // empty and the run would commit the newest timestamp having skipped the tail.
 // Pages after the first must carry the server's query untouched.
-func TestPostHogIncrementalLeavesServerNextURLUntouched(t *testing.T) {
+func TestSourceIncrementalLeavesServerNextURLUntouched(t *testing.T) {
 	ctx := context.Background()
-	var afters, befores []string
+	var dateFroms, offsets []string
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/projects/12345/events/" {
+		if r.URL.Path != "/api/projects/12345/insights/" {
 			http.NotFound(w, r)
 			return
 		}
-		afters = append(afters, r.URL.Query().Get("after"))
-		befores = append(befores, r.URL.Query().Get("before"))
+		dateFroms = append(dateFroms, r.URL.Query().Get("date_from"))
+		offsets = append(offsets, r.URL.Query().Get("offset"))
 		w.Header().Set("Content-Type", "application/json")
-		// Newest first, as PostHog orders events by -timestamp, and the next
-		// URL narrows with `before` rather than an offset.
-		if r.URL.Query().Get("before") == "" {
+		// Return newer records first so injecting the advancing watermark on
+		// page two would skip older records.
+		if r.URL.Query().Get("offset") == "" {
 			fmt.Fprintf(w, `{"next":%q,"results":[
-				{"id":"evt_1","event":"$pageview","distinct_id":"ada",
-				 "timestamp":"2026-08-01T15:00:00Z","properties":{},"person":null,
-				 "elements":[],"elements_chain":""}]}`,
-				"http://"+r.Host+"/api/projects/12345/events/?limit=100&before=2026-08-01T15%3A00%3A00Z")
+				{"id":1,"short_id":"insight_1","last_modified_at":"2026-08-01T15:00:00Z"}]}`,
+				"http://"+r.Host+"/api/projects/12345/insights/?limit=100&offset=100")
 			return
 		}
 		fmt.Fprint(w, `{"next":null,"results":[
-			{"id":"evt_0","event":"$pageview","distinct_id":"grace",
-			 "timestamp":"2026-07-20T09:00:00Z","properties":{},"person":null,
-			 "elements":[],"elements_chain":""}]}`)
+			{"id":2,"short_id":"insight_2","last_modified_at":"2026-07-20T09:00:00Z"}]}`)
 	}))
 	defer api.Close()
 
-	src := NewManifest(unthrottledPostHogManifest(t))
-	if err := src.Configure(ctx, filament.NewConfig(map[string]any{
-		"api_key":    "phx_test_123",
-		"project_id": "12345",
-		"host":       api.URL,
-	})); err != nil {
+	src := NewManifest([]byte(`version: 1
+name: next_url_regression
+display_name: Next URL regression
+description: Incremental pagination regression.
+dark_logo_url: https://example.com/dark.svg
+light_logo_url: https://example.com/light.svg
+connection:
+  base_url: "` + api.URL + `"
+resources:
+  - name: insights
+    path: /api/projects/12345/insights/
+    primary_key: [id]
+    fields:
+      id: int64
+      last_modified_at: timestamptz
+    response:
+      records: $.results
+      pagination: { next_url: next }
+    incremental:
+      cursor_field: last_modified_at
+      start_param: date_from
+      inject_into: query
+      comparator: time
+`))
+	if err := src.Configure(ctx, filament.NewConfig(nil)); err != nil {
 		t.Fatalf("configure: %v", err)
 	}
 	defer src.Teardown(ctx)
 
 	var sink collectSink
-	if err := src.Extract(ctx, &sink, filament.ExtractOpts{Resources: []string{"events"}, Parallelism: 1}); err != nil {
-		t.Fatalf("extract events: %v", err)
+	if err := src.Extract(ctx, &sink, filament.ExtractOpts{Resources: []string{"insights"}, Parallelism: 1}); err != nil {
+		t.Fatalf("extract insights: %v", err)
 	}
 
-	if len(afters) != 2 {
-		t.Fatalf("requests = %d, want both pages walked", len(afters))
+	if len(dateFroms) != 2 {
+		t.Fatalf("requests = %d, want both pages walked", len(dateFroms))
 	}
 	// Page one had no stored watermark, and page two must not inherit the one
 	// page one's own records just produced.
-	if afters[0] != "" || afters[1] != "" {
-		t.Fatalf("after = %v, want no watermark injected on either page", afters)
+	if dateFroms[0] != "" || dateFroms[1] != "" {
+		t.Fatalf("date_from = %v, want no watermark injected on either page", dateFroms)
 	}
-	if befores[1] == "" {
-		t.Fatalf("before = %v, want the server's own bound preserved on page two", befores)
+	if offsets[1] != "100" {
+		t.Fatalf("offset = %v, want the server's own offset preserved on page two", offsets)
 	}
 	if len(sink.records) != 2 {
-		t.Fatalf("records = %d, want both pages of events", len(sink.records))
+		t.Fatalf("records = %d, want both pages of insights", len(sink.records))
+	}
+}
+
+func TestStaticDiscoveryDefaultResources(t *testing.T) {
+	for _, tc := range []struct {
+		name, defaults string
+		want           []string
+	}{
+		{"omitted", "", []string{"", ""}},
+		{"subset", "  default_resources: [one]\n", []string{"true", "false"}},
+		{"none", "  default_resources: []\n", []string{"false", "false"}},
+		{"all", "  default_resources: [one, two]\n", []string{"true", "true"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := NewManifest([]byte(`version: 1
+name: test
+display_name: Test
+description: Static selection defaults.
+dark_logo_url: https://example.com/dark.svg
+light_logo_url: https://example.com/light.svg
+connection:
+  base_url: https://example.com
+resources:
+  - name: one
+    path: /one
+  - name: two
+    path: /two
+discovery:
+  mode: static
+` + tc.defaults))
+			if err := src.Configure(t.Context(), filament.NewConfig(nil)); err != nil {
+				t.Fatal(err)
+			}
+			defer src.Teardown(t.Context())
+			got, err := src.Discover(t.Context(), filament.DiscoverOpts{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got.Resources) != 2 {
+				t.Fatal("defaults must not filter discovery")
+			}
+			for i, r := range got.Resources {
+				if !r.Selectable || r.Metadata["default_resources"] != tc.want[i] {
+					t.Fatalf("resource %s: selectable=%v metadata=%v", r.Name, r.Selectable, r.Metadata)
+				}
+			}
+			planned, err := src.PlanResources(t.Context(), []string{"two"}, nil)
+			if err != nil || !slices.Equal(planned, []string{"two"}) {
+				t.Fatalf("explicit selection: %v, %v", planned, err)
+			}
+		})
+	}
+}
+
+func TestCatalogGranolaSpecAndEmbeddedManifest(t *testing.T) {
+	ctx := context.Background()
+	src := catalogSource(t, "granola@v1")
+	spec := src.Spec()
+	if spec.Name != "granola@v1" || spec.DisplayName != "Granola" {
+		t.Fatalf("spec identity = %q/%q, want granola/Granola", spec.Name, spec.DisplayName)
+	}
+	if len(spec.Config.Fields) != 1 {
+		t.Fatalf("config fields = %#v, want api_key", spec.Config.Fields)
+	}
+	field := spec.Config.Fields[0]
+	if field.Name != "api_key" || field.Type != filament.FieldSecret || !field.Required {
+		t.Fatalf("api_key field = %#v, want required secret", field)
+	}
+	if err := src.Validate(filament.NewConfig(map[string]any{})); err == nil {
+		t.Fatal("validate without API key succeeded")
+	}
+	if err := src.Configure(ctx, filament.NewConfig(map[string]any{"api_key": "grn_test"})); err != nil {
+		t.Fatal(err)
+	}
+	defer src.Teardown(ctx)
+	discovered, err := src.Discover(ctx, filament.DiscoverOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names, enabled []string
+	for _, resource := range discovered.Resources {
+		names = append(names, resource.Name)
+		if resource.Metadata["default_resources"] == "true" {
+			enabled = append(enabled, resource.Name)
+		}
+	}
+	want := []string{"notes", "note_details", "transcripts", "folders", "webhook_endpoints"}
+	if !slices.Equal(names, want) || !slices.Equal(enabled, want[:4]) {
+		t.Fatalf("resources = %v, defaults = %v", names, enabled)
+	}
+	for _, name := range want {
+		schema, err := src.Schema(ctx, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if name == "transcripts" {
+			if len(schema.PrimaryKey) != 0 {
+				t.Fatalf("transcript primary key = %v, want keyless", schema.PrimaryKey)
+			}
+		} else if !slices.Equal(schema.PrimaryKey, []string{"id"}) {
+			t.Fatalf("%s primary key = %v, want id", name, schema.PrimaryKey)
+		}
+	}
+}
+
+func TestGranolaExtractionPaginationAndFanOut(t *testing.T) {
+	ctx := context.Background()
+	// Both transcript pages intentionally contain the same item. No invented
+	// primary key may collapse repeated speech or coincident timestamps.
+	item := `{"speaker":{"source":"microphone","diarization_label":"Speaker A","name":"Alice"},"text":"Hello","start_time":"2026-01-27T15:30:00Z","end_time":"2026-01-27T15:30:01Z","confidence":0.9}`
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer grn_test" || r.Header.Get("Accept") != "application/json" {
+			t.Errorf("unexpected request: %s %s, headers %v", r.Method, r.URL, r.Header)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		q := r.URL.Query()
+		switch r.URL.Path {
+		case "/v1/notes":
+			if q.Get("page_size") != "30" || q.Has("updated_after") {
+				t.Errorf("full note query = %v", q)
+			}
+			id, more, cursor := "not_1d3tmYTlCICgjy", true, `"notes-2"`
+			if q.Get("cursor") != "" {
+				if q.Get("cursor") != "notes-2" {
+					t.Errorf("note cursor = %q", q.Get("cursor"))
+				}
+				id, more, cursor = "not_2d3tmYTlCICgjy", false, "null"
+			}
+			fmt.Fprintf(w, `{"notes":[{"id":%q,"object":"note","title":null,"owner":{"name":null,"email":"alice@example.com"},"created_at":"2026-01-27T15:30:00Z","updated_at":"2026-01-27T16:45:00Z","extra":"kept"}],"hasMore":%t,"cursor":%s}`, id, more, cursor)
+		case "/v1/notes/not_1d3tmYTlCICgjy", "/v1/notes/not_2d3tmYTlCICgjy":
+			if len(q) != 0 {
+				t.Errorf("detail request must not inherit pagination or include transcript: %v", q)
+			}
+			id := strings.TrimPrefix(r.URL.Path, "/v1/notes/")
+			fmt.Fprintf(w, `{"id":%q,"object":"note","title":null,"owner":{"name":null,"email":"alice@example.com"},"created_at":"2026-01-27T15:30:00Z","updated_at":"2026-01-27T16:45:00Z","web_url":"https://notes.granola.ai/d/example","calendar_event":null,"attendees":[{"name":"Alice","email":"alice@example.com"}],"folder_membership":[{"id":"fol_4y6LduVdwSKC27","object":"folder","name":"Team","parent_folder_id":null}],"summary_text":"Meeting summary","summary_markdown":"## Meeting summary","private_notes_text":null,"private_notes_markdown":null,"transcript":null}`, id)
+		case "/v1/notes/not_1d3tmYTlCICgjy/transcript":
+			if q.Get("page_size") != "100" {
+				t.Errorf("transcript page size = %q", q.Get("page_size"))
+			}
+			if q.Get("cursor") == "" {
+				fmt.Fprintf(w, `{"transcript":[%s],"hasMore":true,"cursor":"transcript-2"}`, item)
+			} else {
+				if q.Get("cursor") != "transcript-2" {
+					t.Errorf("transcript cursor = %q", q.Get("cursor"))
+				}
+				fmt.Fprintf(w, `{"transcript":[%s],"hasMore":false,"cursor":null}`, item)
+			}
+		case "/v1/notes/not_2d3tmYTlCICgjy/transcript":
+			if q.Get("cursor") != "" || q.Get("page_size") != "100" {
+				t.Errorf("second parent's transcript query = %v", q)
+			}
+			fmt.Fprint(w, `{"transcript":[],"hasMore":false,"cursor":null}`)
+		case "/v1/folders":
+			if q.Get("page_size") != "30" {
+				t.Errorf("folder page size = %q", q.Get("page_size"))
+			}
+			if q.Get("cursor") == "" {
+				fmt.Fprint(w, `{"folders":[{"id":"fol_4y6LduVdwSKC27","object":"folder","name":"Team","parent_folder_id":null}],"hasMore":true,"cursor":"folders-2"}`)
+			} else {
+				if q.Get("cursor") != "folders-2" {
+					t.Errorf("folder cursor = %q", q.Get("cursor"))
+				}
+				fmt.Fprint(w, `{"folders":[{"id":"fol_a74g2hvl98iUHG","object":"folder","name":"Weekly","parent_folder_id":"fol_4y6LduVdwSKC27"}],"hasMore":false}`)
+			}
+		case "/v1/webhook-endpoints":
+			if len(q) != 0 {
+				t.Errorf("webhook query = %v, want none", q)
+			}
+			fmt.Fprint(w, `{"webhook_endpoints":[{"id":"whe_2mKr8fQxLp7Ta3","object":"webhook_endpoint","url":"https://example.com","url_redacted":true,"events":["note.edited"],"folder_ids":[],"scopes":["workspace"],"created_by":null,"enabled":true,"created_at":"2026-01-27T15:30:00Z"}]}`)
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer api.Close()
+
+	data := strings.Replace(string(catalogManifest(t, "granola", "v1")), "https://public-api.granola.ai", api.URL, 1)
+	data = strings.Replace(data, "requests_per_second: 5", "requests_per_second: 1000", 1)
+	src := NewManifest([]byte(data))
+	if err := src.Configure(ctx, filament.NewConfig(map[string]any{"api_key": "grn_test"})); err != nil {
+		t.Fatal(err)
+	}
+	defer src.Teardown(ctx)
+	for _, selected := range [][]string{
+		{"notes", "note_details", "transcripts", "folders", "webhook_endpoints"},
+		{"note_details", "transcripts"},
+	} {
+		var sink collectSink
+		if err := src.Extract(ctx, &sink, filament.ExtractOpts{Resources: selected}); err != nil {
+			t.Fatal(err)
+		}
+		counts := map[string]int{}
+		for _, rec := range sink.records {
+			counts[rec.Resource]++
+			if !slices.Contains(selected, rec.Resource) {
+				t.Fatalf("unselected resource emitted: %s", rec.Resource)
+			}
+			var row map[string]any
+			if err := json.Unmarshal(rec.Data, &row); err != nil {
+				t.Fatal(err)
+			}
+			switch rec.Resource {
+			case "notes":
+				if row["raw"].(map[string]any)["extra"] != "kept" || row["title"] != nil {
+					t.Fatalf("note projection = %#v", row)
+				}
+			case "note_details":
+				if row["summary_text"] != "Meeting summary" || row["calendar_event"] != nil || len(row["folder_membership"].([]any)) != 1 {
+					t.Fatalf("detail projection = %#v", row)
+				}
+			case "transcripts":
+				if row["note_id"] != "not_1d3tmYTlCICgjy" || row["speaker"].(map[string]any)["diarization_label"] != "Speaker A" || row["raw"].(map[string]any)["confidence"] != 0.9 {
+					t.Fatalf("transcript projection = %#v", row)
+				}
+			case "webhook_endpoints":
+				if row["url_redacted"] != true || row["created_by"] != nil {
+					t.Fatalf("webhook projection = %#v", row)
+				}
+			}
+		}
+		for _, name := range selected {
+			want := 2
+			if name == "webhook_endpoints" {
+				want = 1
+			}
+			if counts[name] != want {
+				t.Fatalf("%s rows = %d, want %d", name, counts[name], want)
+			}
+		}
+	}
+}
+
+func TestGranolaNotesIncrementalPagination(t *testing.T) {
+	ctx := context.Background()
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if r.URL.Path != "/v1/notes" || q.Get("updated_after") != "2026-01-27T15:25:00Z" || q.Get("page_size") != "30" {
+			t.Errorf("incremental request = %s", r.URL)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if q.Get("cursor") == "" {
+			fmt.Fprint(w, `{"notes":[{"id":"not_1d3tmYTlCICgjy","object":"note","title":null,"owner":{"name":null,"email":"alice@example.com"},"created_at":"2026-01-27T15:30:00Z","updated_at":"2026-01-27T16:45:00Z"}],"hasMore":true,"cursor":"next"}`)
+		} else {
+			if q.Get("cursor") != "next" {
+				t.Errorf("cursor = %q", q.Get("cursor"))
+			}
+			fmt.Fprint(w, `{"notes":[{"id":"not_2d3tmYTlCICgjy","object":"note","title":null,"owner":{"name":null,"email":"alice@example.com"},"created_at":"2026-01-27T15:30:00Z","updated_at":"2026-01-27T16:00:00Z"}],"hasMore":false,"cursor":null}`)
+		}
+	}))
+	defer api.Close()
+	data := strings.Replace(string(catalogManifest(t, "granola", "v1")), "https://public-api.granola.ai", api.URL, 1)
+	src := NewManifest([]byte(data))
+	if err := src.Configure(ctx, filament.NewConfig(map[string]any{"api_key": "grn_test"})); err != nil {
+		t.Fatal(err)
+	}
+	defer src.Teardown(ctx)
+	prev := map[string]filament.Checkpoint{
+		"notes": checkpoint.KeysetCheckpoint{
+			Mode: checkpoint.ModeIncremental, Cols: []string{"notes_updated_at"}, Types: []string{"timestamptz"},
+			Shards: []checkpoint.KeysetShard{{Key: []string{"2026-01-27T15:30:00Z"}}},
+		}.ToCheckpoint("notes"),
+	}
+	plan, err := src.PlanIncremental(ctx, []string{"notes"}, prev, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sink collectSink
+	if err := src.ExtractFrom(ctx, &sink, filament.ExtractOpts{Resources: []string{"notes"}}, plan); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.records) != 2 {
+		t.Fatalf("rows = %d, want 2", len(sink.records))
+	}
+	for _, rec := range sink.records {
+		if !slices.Equal(rec.Key, []string{"2026-01-27T16:45:00Z"}) {
+			t.Fatalf("watermark = %v, want maximum updated_at without page cursor", rec.Key)
+		}
+	}
+}
+
+// Fixtures follow the official list response examples. Exercise each new
+// collection's real envelope, projected types, next URL, and raw preservation.
+func TestPostHogAdditionalCollections(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, row     string
+		paginated, archived bool
+	}{
+		{"activity_log", "/api/projects/12345/activity_log/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","user":{"id":0,"uuid":"095be615-a8ad-4c33-8e9c-c7612fbf6c9f","distinct_id":"string","first_name":"string","last_name":"string","email":"user@example.com","is_email_verified":true,"hedgehog_config":{},"role_at_organization":"engineering"},"activity":"string","item_id":"string","scope":"string","detail":null,"created_at":"2019-08-24T14:15:22Z","unmodeled":{"retained":true}}`, true, false},
+		{"alerts", "/api/projects/12345/alerts/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","created_at":"2019-08-24T14:15:22Z","insight":0,"name":"string","threshold":{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","created_at":"2019-08-24T14:15:22Z","name":"string","configuration":{"bounds":null,"type":"absolute"}},"state":"string","enabled":true,"config":{"check_ongoing_interval":null,"series_index":0,"type":"TrendsAlertConfig"},"unmodeled":{"retained":true}}`, true, false},
+		{"batch_exports", "/api/projects/12345/batch_exports/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","name":"string","model":"events","destination":{"type":"S3","config":{"http_path":"string","catalog":"string","schema":"string","table_name":"string","use_variant_type":true,"use_automatic_schema_evolution":true},"integration":0,"integration_id":0},"interval":"hour","paused":true,"created_at":"2019-08-24T14:15:22Z","last_updated_at":"2019-08-24T14:15:22Z","unmodeled":{"retained":true}}`, true, false},
+		{"dashboard_templates", "/api/projects/12345/dashboard_templates/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","template_name":"string","dashboard_description":"string","dashboard_filters":null,"tiles":null,"variables":null,"created_at":"2019-08-24T14:15:22Z","scope":"team","unmodeled":{"retained":true}}`, true, false},
+		{"datasets", "/api/projects/12345/datasets/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","name":"string","description":"string","metadata":{},"archived":true,"current_revision_id":"e5714292-57d7-4936-a019-416c89b9b32b","created_at":"2019-08-24T14:15:22Z","updated_at":"2019-08-24T14:15:22Z","unmodeled":{"retained":true}}`, true, false},
+		{"dataset_items", "/api/projects/12345/dataset_items/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","dataset":"d93f2be0-02b1-4d87-8b6e-fc5cba21ed8d","version":0,"version_id":"9e94c502-ca41-4342-a7f7-af96b444512c","archived":true,"input":{},"expected_output":{},"source_output":{},"metadata":{},"created_at":"2019-08-24T14:15:22Z","updated_at":"2019-08-24T14:15:22Z","unmodeled":{"retained":true}}`, true, false},
+		{"datasets_archived", "/api/projects/12345/datasets/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","name":"string","description":"string","metadata":{},"archived":true,"current_revision_id":"e5714292-57d7-4936-a019-416c89b9b32b","created_at":"2019-08-24T14:15:22Z","updated_at":"2019-08-24T14:15:22Z","unmodeled":{"retained":true}}`, true, true},
+		{"dataset_items_archived", "/api/projects/12345/dataset_items/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","dataset":"d93f2be0-02b1-4d87-8b6e-fc5cba21ed8d","version":0,"version_id":"9e94c502-ca41-4342-a7f7-af96b444512c","archived":true,"input":{},"expected_output":{},"source_output":{},"metadata":{},"created_at":"2019-08-24T14:15:22Z","updated_at":"2019-08-24T14:15:22Z","unmodeled":{"retained":true}}`, true, true},
+		{"endpoints", "/api/projects/12345/endpoints/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","name":"string","description":"string","query":null,"is_active":true,"created_at":"2019-08-24T14:15:22Z","updated_at":"2019-08-24T14:15:22Z","current_version":0,"current_version_id":"158beffb-f9de-457f-bbee-873740e72504","unmodeled":{"retained":true}}`, true, false},
+		{"evaluations", "/api/projects/12345/evaluations/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","name":"string","description":"string","enabled":true,"evaluation_type":"llm_judge","evaluation_config":{"prompt":"string"},"conditions":[{"id":"string","rollout_percentage":100,"properties":[{}]}],"model_configuration":{"provider":"openai","model":"string","provider_key_id":"f265db88-9bcc-4e5b-add5-bfd9a815465c","provider_key_name":"string"},"created_at":"2019-08-24T14:15:22Z","updated_at":"2019-08-24T14:15:22Z","unmodeled":{"retained":true}}`, true, false},
+		{"file_download_batch_exports", "/api/projects/12345/file_download_batch_exports/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","status":"Cancelled","unmodeled":{"retained":true}}`, true, false},
+		{"hog_functions", "/api/projects/12345/hog_functions/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","type":"string","name":"string","created_at":"2019-08-24T14:15:22Z","updated_at":"2019-08-24T14:15:22Z","enabled":true,"hog":"string","filters":null,"unmodeled":{"retained":true}}`, true, false},
+		{"llm_prompts", "/api/projects/12345/llm_prompts/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","name":"string","prompt":null,"config":{},"version":0,"created_at":"2019-08-24T14:15:22Z","updated_at":"2019-08-24T14:15:22Z","labels":["string"],"unmodeled":{"retained":true}}`, true, false},
+		{"llm_clustering_jobs", "/api/projects/12345/llm_analytics/clustering_jobs/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","name":"string","analysis_level":"trace","event_filters":[{}],"enabled":true,"created_at":"2019-08-24T14:15:22Z","updated_at":"2019-08-24T14:15:22Z","unmodeled":{"retained":true}}`, true, false},
+		{"llm_evaluation_reports", "/api/projects/12345/llm_analytics/evaluation_reports/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","evaluation":"8b4883eb-9190-4e70-bfb9-71682af8a50b","frequency":"scheduled","delivery_targets":null,"enabled":true,"created_at":"2019-08-24T14:15:22Z","unmodeled":{"retained":true}}`, true, false},
+		{"llm_parser_recipes", "/api/projects/12345/llm_analytics/parser_recipes/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","name":"string","source":"string","created_at":"2019-08-24T14:15:22Z","updated_at":"2019-08-24T14:15:22Z","unmodeled":{"retained":true}}`, true, false},
+		{"llm_review_queue_items", "/api/projects/12345/llm_analytics/review_queue_items/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","queue_id":"cefd6192-7a66-4699-a2fc-dbb7f43ad507","trace_id":"string","created_at":"2019-08-24T14:15:22Z","updated_at":"2019-08-24T14:15:22Z","unmodeled":{"retained":true}}`, true, false},
+		{"llm_review_queues", "/api/projects/12345/llm_analytics/review_queues/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","name":"string","pending_item_count":0,"created_at":"2019-08-24T14:15:22Z","updated_at":"2019-08-24T14:15:22Z","unmodeled":{"retained":true}}`, true, false},
+		{"llm_score_definitions", "/api/projects/12345/llm_analytics/score_definitions/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","name":"string","description":"string","kind":"categorical","archived":true,"current_version_id":"158beffb-f9de-457f-bbee-873740e72504","config":{"options":[{"key":"string","label":"string"}],"selection_mode":"single","min_selections":1,"max_selections":1},"created_at":"2019-08-24T14:15:22Z","updated_at":"2019-08-24T14:15:22Z","unmodeled":{"retained":true}}`, true, false},
+		{"llm_trace_reviews", "/api/projects/12345/llm_analytics/trace_reviews/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","trace_id":"string","comment":"string","created_at":"2019-08-24T14:15:22Z","updated_at":"2019-08-24T14:15:22Z","scores":[{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","definition_id":"91c1994f-b1db-4fef-840d-7d3ab2984871","definition_name":"string","definition_kind":"string","definition_archived":true,"definition_version_id":"3b4c7def-d68b-4f5f-846c-43f0f8a328ab","definition_version":0,"definition_config":{"options":[{"key":"string","label":"string"}],"selection_mode":"single","min_selections":1,"max_selections":1},"categorical_values":["string"],"numeric_value":"string","boolean_value":true,"created_at":"2019-08-24T14:15:22Z","updated_at":"2019-08-24T14:15:22Z"}],"unmodeled":{"retained":true}}`, true, false},
+		{"subscriptions", "/api/projects/12345/subscriptions/", `{"id":0,"resource_type":"insight","dashboard":0,"insight":0,"target_type":"email","target_value":"string","frequency":"daily","created_at":"2019-08-24T14:15:22Z","enabled":true,"title":"string","unmodeled":{"retained":true}}`, true, false},
+		{"error_tracking_alerts", "/api/projects/12345/error_tracking/alerts/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","name":"string","enabled":true,"triggers":["issue_created"],"filters":{"events":[{}],"actions":[{}],"properties":[{}],"filter_test_accounts":true,"bytecode":null},"destinations":[{"channel_type":"slack","integration_id":0,"config":{"channel":"string","channel_name":"string"},"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08"}],"unmodeled":{"retained":true}}`, true, false},
+		{"error_tracking_assignment_rules", "/api/projects/12345/error_tracking/assignment_rules/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","filters":null,"assignee":{"type":"user","id":0},"order_key":0,"unmodeled":{"retained":true}}`, true, false},
+		{"error_tracking_bypass_rules", "/api/projects/12345/error_tracking/bypass_rules/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","filters":null,"order_key":0,"unmodeled":{"retained":true}}`, true, false},
+		{"error_tracking_external_references", "/api/projects/12345/error_tracking/external_references/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","integration":{"id":0,"kind":"string","display_name":"string"},"external_url":"string","unmodeled":{"retained":true}}`, true, false},
+		{"error_tracking_fingerprints", "/api/projects/12345/error_tracking/fingerprints/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","fingerprint":"string","issue_id":"117c70c4-891b-49ba-96f2-b7599e2af0f7","created_at":"2019-08-24T14:15:22Z","unmodeled":{"retained":true}}`, true, false},
+		{"error_tracking_grouping_rules", "/api/projects/12345/error_tracking/grouping_rules/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","filters":null,"description":"string","issue":{"property1":"string","property2":"string"},"order_key":0,"unmodeled":{"retained":true}}`, false, false},
+		{"error_tracking_issues", "/api/projects/12345/error_tracking/issues/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","status":"string","severity":"low","name":"string","description":"string","first_seen":"2019-08-24T14:15:22Z","assignee":{"id":0,"type":"string"},"external_issues":[{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","integration":{"id":0,"kind":"string","display_name":"string"},"external_url":"string"}],"unmodeled":{"retained":true}}`, true, false},
+		{"error_tracking_releases", "/api/projects/12345/error_tracking/releases/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","hash_id":"string","created_at":"2019-08-24T14:15:22Z","metadata":{},"version":"string","project":"string","unmodeled":{"retained":true}}`, true, false},
+		{"error_tracking_severity_rules", "/api/projects/12345/error_tracking/severity_rules/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","filters":{"type":"AND","values":[{}]},"severity":"low","order_key":0,"unmodeled":{"retained":true}}`, false, false},
+		{"error_tracking_spike_events", "/api/projects/12345/error_tracking/spike_events/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","issue":{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","name":"string","description":"string"},"detected_at":"2019-08-24T14:15:22Z","computed_baseline":0.1,"current_bucket_value":0,"unmodeled":{"retained":true}}`, true, false},
+		{"error_tracking_stack_frames", "/api/projects/12345/error_tracking/stack_frames/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","raw_id":"string","contents":{},"resolved":true,"context":{},"symbol_set_ref":"string","release":{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","hash_id":"string","team_id":0,"created_at":"2019-08-24T14:15:22Z","metadata":{},"version":"string","project":"string"},"unmodeled":{"retained":true}}`, true, false},
+		{"error_tracking_suppression_rules", "/api/projects/12345/error_tracking/suppression_rules/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","filters":null,"order_key":0,"sampling_rate":0.1,"unmodeled":{"retained":true}}`, true, false},
+		{"error_tracking_symbol_sets", "/api/projects/12345/error_tracking/symbol_sets/", `{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","ref":"string","created_at":"2019-08-24T14:15:22Z","last_used":"2019-08-24T14:15:22Z","failure_reason":"string","has_uploaded_file":true,"release":{"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08","hash_id":"string","team_id":0,"created_at":"2019-08-24T14:15:22Z","metadata":{},"version":"string","project":"string"},"unmodeled":{"retained":true}}`, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requests := 0
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if r.URL.Path != tc.path {
+					t.Errorf("path = %s, want %s", r.URL.Path, tc.path)
+					http.NotFound(w, r)
+					return
+				}
+				if tc.archived && requests == 1 && r.URL.Query().Get("archived") != "true" {
+					t.Error("archived filter missing")
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if requests == 1 {
+					if tc.paginated {
+						fmt.Fprintf(w, `{"results":[%s],"next":%q}`, tc.row, "http://"+r.Host+tc.path+"?offset=100")
+					} else {
+						fmt.Fprintf(w, `{"results":[%s]}`, tc.row)
+					}
+				} else {
+					fmt.Fprint(w, `{"results":[],"next":null}`)
+				}
+			}))
+			defer api.Close()
+			src := NewManifest(unthrottledPostHogManifest(t))
+			if err := src.Configure(t.Context(), filament.NewConfig(map[string]any{"api_key": "test", "project_id": "12345", "host": api.URL})); err != nil {
+				t.Fatal(err)
+			}
+			defer src.Teardown(t.Context())
+			var sink collectSink
+			if err := src.Extract(t.Context(), &sink, filament.ExtractOpts{Resources: []string{tc.name}}); err != nil {
+				t.Fatal(err)
+			}
+			wantRequests := 1
+			if tc.paginated {
+				wantRequests = 2
+			}
+			if requests != wantRequests || len(sink.records) != 1 {
+				t.Fatalf("requests=%d records=%d", requests, len(sink.records))
+			}
+			var row map[string]any
+			if err := json.Unmarshal(sink.records[0].Data, &row); err != nil {
+				t.Fatal(err)
+			}
+			if row["raw"].(map[string]any)["unmodeled"] == nil {
+				t.Fatal("raw fields lost")
+			}
+		})
+	}
+}
+
+func TestPostHogNotebookFullHydration(t *testing.T) {
+	var listRequests, detailRequests atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("date_from") != "" {
+			t.Error("full notebook read must not filter by modification date")
+		}
+		if r.URL.Path == "/api/projects/12345/notebooks/" {
+			listRequests.Add(1)
+			if r.URL.Query().Get("offset") == "" {
+				fmt.Fprintf(w, `{"next":%q,"results":[{"short_id":"first"}]}`, "http://"+r.Host+"/api/projects/12345/notebooks/?offset=100")
+			} else {
+				fmt.Fprint(w, `{"next":null,"results":[{"short_id":"second"}]}`)
+			}
+			return
+		}
+		var id, shortID string
+		switch r.URL.Path {
+		case "/api/projects/12345/notebooks/first/":
+			id, shortID = "095be615-a8ad-4c33-8e9c-c7612fbf6c9f", "first"
+		case "/api/projects/12345/notebooks/second/":
+			id, shortID = "195be615-a8ad-4c33-8e9c-c7612fbf6c9f", "second"
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		detailRequests.Add(1)
+		fmt.Fprintf(w, `{"id":%q,"short_id":%q,"content":{"type":"doc"},"text_content":"Complete notebook","variables":[{"name":"example"}]}`, id, shortID)
+	}))
+	defer api.Close()
+	src := NewManifest(unthrottledPostHogManifest(t))
+	if err := src.Configure(t.Context(), filament.NewConfig(map[string]any{"api_key": "test", "project_id": "12345", "host": api.URL})); err != nil {
+		t.Fatal(err)
+	}
+	defer src.Teardown(t.Context())
+	if _, err := src.PlanIncremental(t.Context(), []string{"notebooks"}, nil, nil); err == nil {
+		t.Fatal("notebooks must remain full-only")
+	}
+	var sink collectSink
+	if err := src.Extract(t.Context(), &sink, filament.ExtractOpts{Resources: []string{"notebooks"}}); err != nil {
+		t.Fatal(err)
+	}
+	if listRequests.Load() != 2 || detailRequests.Load() != 2 || len(sink.records) != 2 {
+		t.Fatalf("lists=%d details=%d rows=%d", listRequests.Load(), detailRequests.Load(), len(sink.records))
+	}
+	for _, rec := range sink.records {
+		if rec.Resource != "notebooks" {
+			t.Fatalf("unselected parent emitted: %s", rec.Resource)
+		}
+		var row map[string]any
+		if err := json.Unmarshal(rec.Data, &row); err != nil {
+			t.Fatal(err)
+		}
+		if row["text_content"] != "Complete notebook" || row["content"] == nil || row["variables"] == nil {
+			t.Fatalf("detail content lost: %s", rec.Data)
+		}
+	}
+}
+
+func TestPostHogIncrementalRequestBounds(t *testing.T) {
+	for _, tc := range []struct {
+		resource, key, row string
+		lookback           int
+		want               string
+	}{
+		{"insights", "insights_modified_at", `{"id":1,"short_id":"insight","last_modified_at":"2026-09-03T00:00:00Z"}`, 0, "2026-09-01T23:59:59Z"},
+		{"session_recordings", "session_recordings_start_time", `{"id":"session","start_time":"2026-09-03T00:00:00Z"}`, 0, "2026-09-01T00:00:00Z"},
+		{"session_recordings", "session_recordings_start_time", `{"id":"session","start_time":"2026-09-03T00:00:00Z"}`, 172800, "2026-08-31T00:00:00Z"},
+	} {
+		t.Run(fmt.Sprintf("%s_%d", tc.resource, tc.lookback), func(t *testing.T) {
+			requests := 0
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				q := r.URL.Query()
+				w.Header().Set("Content-Type", "application/json")
+				if q.Get("date_from") != tc.want {
+					t.Errorf("date_from=%q want %q", q.Get("date_from"), tc.want)
+				}
+				if tc.resource == "session_recordings" {
+					if q.Get("order_direction") != "ASC" || (requests == 2 && q.Get("after") != "opaque-page") {
+						t.Errorf("replay query=%s", r.URL)
+					}
+					if requests == 1 {
+						fmt.Fprintf(w, `{"results":[%s],"has_next":true,"next_cursor":"opaque-page"}`, tc.row)
+					} else {
+						fmt.Fprint(w, `{"results":[],"has_next":false,"next_cursor":null}`)
+					}
+				} else {
+					if requests == 1 {
+						fmt.Fprintf(w, `{"results":[%s],"next":%q}`, tc.row, "http://"+r.Host+r.URL.Path+"?offset=100&date_from="+tc.want)
+					} else {
+						fmt.Fprint(w, `{"results":[],"next":null}`)
+					}
+				}
+			}))
+			defer api.Close()
+			src := NewManifest(unthrottledPostHogManifest(t))
+			if err := src.Configure(t.Context(), filament.NewConfig(map[string]any{"api_key": "test", "project_id": "12345", "host": api.URL, "session_recordings_start_date": "2020-01-01T00:00:00Z"})); err != nil {
+				t.Fatal(err)
+			}
+			defer src.Teardown(t.Context())
+			prev := map[string]filament.Checkpoint{tc.resource: checkpoint.KeysetCheckpoint{Mode: checkpoint.ModeIncremental, Cols: []string{tc.key}, Types: []string{"timestamptz"}, Shards: []checkpoint.KeysetShard{{Key: []string{"2026-09-02T00:00:00Z"}}}}.ToCheckpoint(tc.resource)}
+			plan, err := src.PlanIncremental(t.Context(), []string{tc.resource}, prev, map[string]filament.ResourceCursorConfig{tc.resource: {LookbackSeconds: int64(tc.lookback)}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var sink collectSink
+			if err := src.ExtractFrom(t.Context(), &sink, filament.ExtractOpts{Resources: []string{tc.resource}}, plan); err != nil {
+				t.Fatal(err)
+			}
+			if requests != 2 || len(sink.records) != 1 {
+				t.Fatalf("requests=%d rows=%d", requests, len(sink.records))
+			}
+		})
+	}
+}
+
+func TestPostHogSurveyResponsesOffsetsAndParentIdentity(t *testing.T) {
+	var pages atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/projects/12345/surveys/" {
+			fmt.Fprint(w, `{"next":null,"results":[{"id":"survey-a"},{"id":"survey-b"}]}`)
+			return
+		}
+		if !strings.HasSuffix(r.URL.Path, "/responses/") {
+			http.NotFound(w, r)
+			return
+		}
+		pages.Add(1)
+		q := r.URL.Query()
+		if q.Get("limit") != "100" || q.Get("exclude_archived") != "false" {
+			t.Errorf("query=%s", r.URL)
+		}
+		rows := []map[string]any{}
+		if q.Get("offset") == "0" {
+			for i := 0; i < 100; i++ {
+				rows = append(rows, map[string]any{"uuid": fmt.Sprint(i), "answers": map[string]any{"question": "answer"}, "submitted_at": "2026-09-01T00:00:00Z"})
+			}
+		} else if q.Get("offset") != "100" {
+			t.Errorf("unexpected offset %s", r.URL)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"results": rows, "has_more": len(rows) > 0, "offset": q.Get("offset"), "limit": 100})
+	}))
+	defer api.Close()
+	src := NewManifest(unthrottledPostHogManifest(t))
+	if err := src.Configure(t.Context(), filament.NewConfig(map[string]any{"api_key": "test", "project_id": "12345", "host": api.URL})); err != nil {
+		t.Fatal(err)
+	}
+	defer src.Teardown(t.Context())
+	var sink collectSink
+	if err := src.Extract(t.Context(), &sink, filament.ExtractOpts{Resources: []string{"survey_responses"}}); err != nil {
+		t.Fatal(err)
+	}
+	if pages.Load() != 4 || len(sink.records) != 200 {
+		t.Fatalf("pages=%d rows=%d", pages.Load(), len(sink.records))
+	}
+	ids := map[string]bool{}
+	for _, rec := range sink.records {
+		if rec.Resource != "survey_responses" {
+			t.Fatalf("parent emitted: %s", rec.Resource)
+		}
+		var row map[string]any
+		if err := json.Unmarshal(rec.Data, &row); err != nil {
+			t.Fatal(err)
+		}
+		ids[row["survey_id"].(string)+"/"+row["uuid"].(string)] = true
+		if row["answers"].(map[string]any)["question"] != "answer" {
+			t.Fatal("answers missing")
+		}
+	}
+	if len(ids) != 200 {
+		t.Fatal("survey response identities collided")
+	}
+}
+
+func TestPostHogAdditionalChildCollections(t *testing.T) {
+	for _, tc := range []struct{ name, parentPath, parentRow, path, row, parentField string }{
+		{"batch_export_runs", "/api/projects/12345/batch_exports/", `{"id": "parent-1"}`, "/api/projects/12345/batch_exports/parent-1/runs/", `{"id": "497f6eca-6276-4993-bfeb-53cbbbba6f08", "status": "Cancelled", "records_completed": -2147483648, "records_failed": -2147483648, "created_at": "2019-08-24T14:15:22Z", "last_updated_at": "2019-08-24T14:15:22Z"}`, "batch_export_id"},
+		{"batch_export_backfills", "/api/projects/12345/batch_exports/", `{"id": "parent-1"}`, "/api/projects/12345/batch_exports/parent-1/backfills/", `{"id": "497f6eca-6276-4993-bfeb-53cbbbba6f08", "progress": {"total_runs": 0, "finished_runs": 0, "progress": 0}, "start_at": "2019-08-24T14:15:22Z", "end_at": "2019-08-24T14:15:22Z", "status": "Cancelled", "created_at": "2019-08-24T14:15:22Z"}`, "batch_export_id"},
+		{"subscription_deliveries", "/api/projects/12345/subscriptions/", `{"id": "parent-1"}`, "/api/projects/12345/subscriptions/parent-1/deliveries/", `{"id": "497f6eca-6276-4993-bfeb-53cbbbba6f08", "content_snapshot": null, "recipient_results": null, "status": "starting", "error": null, "created_at": "2019-08-24T14:15:22Z"}`, "subscription_id"},
+		{"llm_evaluation_report_runs", "/api/projects/12345/llm_analytics/evaluation_reports/", `{"id": "parent-1"}`, "/api/projects/12345/llm_analytics/evaluation_reports/parent-1/runs/", `{"id": "497f6eca-6276-4993-bfeb-53cbbbba6f08", "content": {"evaluation_target": "generation", "title": "string", "sections": [{"title": "string", "content": "string"}], "citations": [{"generation_id": "string", "trace_id": "string", "session_id": "string", "reason": "string"}], "generation_status": "completed", "metrics": {"output_type": "boolean", "total_runs": 0, "result_counts": {"property1": 0, "property2": 0}, "result_rates": {"property1": 0.1, "property2": 0.1}, "period_start": "string", "period_end": "string", "previous_total_runs": 0, "previous_result_counts": {"property1": 0, "property2": 0}, "previous_result_rates": {"property1": 0.1, "property2": 0.1}, "pass_rate": 0.1, "previous_pass_rate": 0}}, "metadata": {"output_type": "boolean", "total_runs": 0, "result_counts": {"property1": 0, "property2": 0}, "result_rates": {"property1": 0.1, "property2": 0.1}, "period_start": "string", "period_end": "string", "previous_total_runs": 0, "previous_result_counts": {"property1": 0, "property2": 0}, "previous_result_rates": {"property1": 0.1, "property2": 0.1}, "pass_rate": 0.1, "previous_pass_rate": 0}, "period_start": "2019-08-24T14:15:22Z", "period_end": "2019-08-24T14:15:22Z", "delivery_status": "pending", "created_at": "2019-08-24T14:15:22Z"}`, "report_id"},
+		{"endpoint_versions", "/api/projects/12345/endpoints/", `{"name": "parent-1"}`, "/api/projects/12345/endpoints/parent-1/versions/", `{"id": "497f6eca-6276-4993-bfeb-53cbbbba6f08", "name": "string", "query": null, "version": 0, "version_id": "9e94c502-ca41-4342-a7f7-af96b444512c", "version_created_at": "2026-09-01T00:00:00Z"}`, "endpoint_name"},
+		{"dataset_revisions", "/api/projects/12345/datasets/", `{"id": "parent-1"}`, "/api/projects/12345/datasets/parent-1/revisions/", `{"id": "497f6eca-6276-4993-bfeb-53cbbbba6f08", "revision": 0, "created_at": "2019-08-24T14:15:22Z"}`, "dataset_id"},
+		{"dataset_revisions_archived", "/api/projects/12345/datasets/", `{"id": "parent-1"}`, "/api/projects/12345/datasets/parent-1/revisions/", `{"id": "497f6eca-6276-4993-bfeb-53cbbbba6f08", "revision": 0, "created_at": "2019-08-24T14:15:22Z"}`, "dataset_id"},
+		{"dataset_item_versions", "/api/projects/12345/dataset_items/", `{"id": "parent-1"}`, "/api/projects/12345/dataset_items/parent-1/versions/", `{"id": "497f6eca-6276-4993-bfeb-53cbbbba6f08", "version": 0, "version_id": "9e94c502-ca41-4342-a7f7-af96b444512c", "input": {}, "expected_output": {}, "metadata": {}, "version_created_at": "2019-08-24T14:15:22Z"}`, "dataset_item_id"},
+		{"dataset_item_versions_archived", "/api/projects/12345/dataset_items/", `{"id": "parent-1"}`, "/api/projects/12345/dataset_items/parent-1/versions/", `{"id": "497f6eca-6276-4993-bfeb-53cbbbba6f08", "version": 0, "version_id": "9e94c502-ca41-4342-a7f7-af96b444512c", "input": {}, "expected_output": {}, "metadata": {}, "version_created_at": "2019-08-24T14:15:22Z"}`, "dataset_item_id"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requests := 0
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == tc.parentPath {
+					fmt.Fprintf(w, `{"results":[%s],"next":null}`, tc.parentRow)
+					return
+				}
+				if r.URL.Path != tc.path {
+					t.Errorf("unexpected path %s", r.URL.Path)
+					http.NotFound(w, r)
+					return
+				}
+				requests++
+				if requests == 1 {
+					fmt.Fprintf(w, `{"results":[%s],"next":%q}`, tc.row, "http://"+r.Host+tc.path+"?cursor=next")
+				} else {
+					fmt.Fprint(w, `{"results":[],"next":null}`)
+				}
+			}))
+			defer api.Close()
+			src := NewManifest(unthrottledPostHogManifest(t))
+			if err := src.Configure(t.Context(), filament.NewConfig(map[string]any{"api_key": "test", "project_id": "12345", "host": api.URL})); err != nil {
+				t.Fatal(err)
+			}
+			defer src.Teardown(t.Context())
+			var sink collectSink
+			if err := src.Extract(t.Context(), &sink, filament.ExtractOpts{Resources: []string{tc.name}}); err != nil {
+				t.Fatal(err)
+			}
+			if requests != 2 || len(sink.records) != 1 {
+				t.Fatalf("pages=%d rows=%d", requests, len(sink.records))
+			}
+			if sink.records[0].Resource != tc.name {
+				t.Fatal("unselected parent emitted")
+			}
+			var row map[string]any
+			if err := json.Unmarshal(sink.records[0].Data, &row); err != nil {
+				t.Fatal(err)
+			}
+			if row[tc.parentField] != "parent-1" {
+				t.Fatalf("parent identity lost: %s", sink.records[0].Data)
+			}
+		})
+	}
+}
+
+func TestPostHogDashboardDetailHydration(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/projects/12345/dashboards/":
+			fmt.Fprint(w, `{"next":null,"results":[{"id":7}]}`)
+		case "/api/projects/12345/dashboards/7/":
+			if r.URL.Query().Get("refresh") != "force_cache" {
+				t.Error("dashboard requested fresh computation")
+			}
+			fmt.Fprint(w, `{"id":7,"tiles":[{"id":1,"layouts":{"lg":{"x":0,"y":1}}}],"filters":{"date_from":"-30d"},"variables":[{"id":"v"}]}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer api.Close()
+	src := NewManifest(unthrottledPostHogManifest(t))
+	if err := src.Configure(t.Context(), filament.NewConfig(map[string]any{"api_key": "test", "project_id": "12345", "host": api.URL})); err != nil {
+		t.Fatal(err)
+	}
+	defer src.Teardown(t.Context())
+	var sink collectSink
+	if err := src.Extract(t.Context(), &sink, filament.ExtractOpts{Resources: []string{"dashboards"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.records) != 1 || sink.records[0].Resource != "dashboards" {
+		t.Fatalf("records=%v", sink.records)
+	}
+	var row map[string]any
+	if err := json.Unmarshal(sink.records[0].Data, &row); err != nil {
+		t.Fatal(err)
+	}
+	if row["tiles"] == nil || row["filters"] == nil || row["variables"] == nil {
+		t.Fatalf("detail fields lost: %s", sink.records[0].Data)
 	}
 }

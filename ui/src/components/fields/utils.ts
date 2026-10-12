@@ -1,7 +1,7 @@
 import { type JsonValue, toJson } from "@bufbuild/protobuf";
 import { ValueSchema } from "@bufbuild/protobuf/wkt";
 
-import { type ConfigField, FieldScope } from "@/gen/ingestion/v1/common_pb";
+import { type ConfigField, FieldScope, FieldType } from "@/gen/ingestion/v1/common_pb";
 
 const ACRONYMS_TO_CAPITALIZE: string[] = [
   "api",
@@ -9,6 +9,7 @@ const ACRONYMS_TO_CAPITALIZE: string[] = [
   "id",
   "s3",
   "aws",
+  "iam",
   "sql",
   "json",
   "http",
@@ -27,7 +28,7 @@ const ACRONYMS_TO_CAPITALIZE: string[] = [
   "tib",
 ];
 
-export function formatFieldName(fieldName: string): string {
+export const formatFieldName = (fieldName: string): string => {
   return fieldName
     .replace(/_/g, " ")
     .replace(/([a-z])([A-Z])/g, "$1 $2")
@@ -39,31 +40,71 @@ export function formatFieldName(fieldName: string): string {
       return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
     })
     .join(" ");
-}
+};
 
-export function isFieldVisible(field: ConfigField, siblings: Record<string, JsonValue>): boolean {
+export const isFieldVisible = (
+  field: ConfigField,
+  siblings: Record<string, JsonValue>,
+): boolean => {
   if (!field.visibleWhen) return true;
 
   const value = siblings[field.visibleWhen.field];
   return typeof value === "string" && field.visibleWhen.values.includes(value);
-}
+};
 
-export function isJsonObject(value: JsonValue): value is Record<string, JsonValue> {
+export const isJsonObject = (value: JsonValue): value is Record<string, JsonValue> => {
   return value !== null && typeof value === "object" && !Array.isArray(value);
-}
+};
 
-export function getFieldDefaults(fields: ConfigField[]): Record<string, JsonValue> {
+export const getFieldDefaults = (
+  fields: ConfigField[],
+  values: Record<string, JsonValue> = {},
+): Record<string, JsonValue> => {
   const defaults: Record<string, JsonValue> = {};
   for (const field of fields) {
-    if (field.default) defaults[field.name] = toJson(ValueSchema, field.default);
+    if (field.default && isFieldVisible(field, { ...defaults, ...values })) {
+      defaults[field.name] = toJson(ValueSchema, field.default);
+    }
   }
   return defaults;
-}
+};
 
-export function getConnectionScopedFields(fields: ConfigField[]): ConfigField[] {
+export const createConfigFieldValues = (
+  fields: ConfigField[],
+  values: Record<string, JsonValue>,
+  fieldName: string,
+  value: JsonValue,
+): Record<string, JsonValue> => {
+  const next = { ...values, [fieldName]: value };
+  const before = { ...getFieldDefaults(fields, values), ...values };
+  const after = { ...getFieldDefaults(fields, next), ...next };
+  const dependentNames = new Set(
+    fields.filter((field) => field.visibleWhen?.field === fieldName).map((field) => field.name),
+  );
+
+  for (const name of dependentNames) {
+    const previousField = fields.find(
+      (field) => field.name === name && isFieldVisible(field, before),
+    );
+    const nextField = fields.find((field) => field.name === name && isFieldVisible(field, after));
+    if (previousField === nextField) continue;
+
+    if (nextField?.default) {
+      next[name] = toJson(ValueSchema, nextField.default);
+    } else {
+      delete next[name];
+    }
+  }
+  return next;
+};
+
+export const getConnectionScopedFields = (fields: ConfigField[]): ConfigField[] => {
   return fields.filter((field) => field.scope === FieldScope.CONNECTION);
-}
+};
 
-export function getPipelineScopedFields(fields: ConfigField[]): ConfigField[] {
-  return fields.filter((field) => field.scope === FieldScope.PIPELINE);
-}
+const isRenderableField = (field: ConfigField): boolean =>
+  field.type !== FieldType.LIST || field.enum.length > 0;
+
+export const getPipelineScopedFields = (fields: ConfigField[]): ConfigField[] => {
+  return fields.filter((field) => field.scope === FieldScope.PIPELINE && isRenderableField(field));
+};

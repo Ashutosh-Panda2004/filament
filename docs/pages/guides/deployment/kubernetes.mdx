@@ -4,9 +4,8 @@ description: "Deploy Filament with the Helm chart"
 ---
 
 Kubernetes with Helm is the recommended way to run Filament in production.
-The chart deploys the server and control plane, runs database migrations, and
-creates a worker Job for each run. It does not create a long-running worker
-Deployment.
+The chart deploys the server, control plane, and a persistent worker for connector
+calls. It runs database migrations and creates a worker Job for each run.
 
 <Warning>
 Run exactly one control-plane replica. Multiple replicas may race while
@@ -37,12 +36,15 @@ helm upgrade --install filament oci://ghcr.io/galaxy-io/charts/filament \
 The encryption key must be base64 and decode to 16, 24, or 32 bytes.
 
 To manage these values outside Helm, set `existingSecret` to a Kubernetes
-Secret that contains `PERSISTENCE_DSN`, `NATS_URL`, and `ENCRYPTION_KEY`. Add
-`AUTH_PAT` when using an external Zitadel provider. When `existingSecret` is
-set, the chart does not create a Secret.
+Secret that contains `PERSISTENCE_DSN`, `NATS_URL`, and `ENCRYPTION_KEY`.
+When `existingSecret` is set, the chart does not create a runtime Secret.
+Authentication credentials use a separate provider Secret so they are not
+passed to the control plane or workers.
 
-If you use AWS Secrets Manager instead of the datastore-backed provider, you
-do not need `ENCRYPTION_KEY`. See
+If you use AWS or GCP Secret Manager instead of the datastore-backed provider,
+you do not need `ENCRYPTION_KEY`. For GKE, configure Workload Identity on the
+server, control-plane, and worker ServiceAccounts using their existing
+`serviceAccount.name` or `serviceAccount.annotations` values. See
 [Configuration](/pages/guides/deployment/configuration) for provider settings.
 
 ## Resources
@@ -71,8 +73,11 @@ migrations separately.
 
 Both Deployments annotate their pods with checksums of the rendered ConfigMap
 and chart-managed Secret. Changing either resource through Helm triggers a
-rollout even when the image tag stays the same. Changes to an `existingSecret`
-do not affect the checksum, so restart both Deployments after rotating one.
+rollout even when the image tag stays the same. The server also checksums its
+chart-managed authentication Secret, so rotating provider credentials only
+rolls the server. Changes to an existing Secret do not affect these checksums:
+restart both Deployments after rotating the runtime Secret, or just the server
+after rotating an authentication Secret.
 
 The server and control plane expose `/startupz`, `/readyz`, and `/livez`.
 Startup succeeds after NATS connects and the runtime modules start. Readiness
@@ -93,14 +98,30 @@ settings from a Secret and ConfigMap, then loads the run from the datastore.
 Each pipeline can set its own CPU, memory, node selectors, and tolerations.
 This lets Kubernetes place and size each run independently.
 
+The chart also runs the worker image as a persistent Deployment that answers
+the server's connector calls. It shares the Jobs' image and ServiceAccount and
+receives no runtime Secret.
+
+The worker NetworkPolicy is enabled by default. It allows connector calls only
+from this release's server and control plane in the same namespace, on
+`worker.service.port`. It does not restrict outbound connector traffic or select
+dispatched worker Jobs. The cluster's network plugin must enforce NetworkPolicy,
+and other policies can allow additional traffic. Use
+`worker.networkPolicy.extraIngress` for additional callers, or set
+`worker.networkPolicy.enabled=false` when access is managed externally.
+
+NetworkPolicy does not encrypt the RPC connection. Use TLS or a service mesh to
+protect resolved connection credentials in transit.
+
 Common worker settings include:
 
-- `controlPlane.dispatch.job.namePrefix` (default `filament`)
-- `controlPlane.dispatch.job.backoffLimit` (default 1)
-- `controlPlane.dispatch.job.ttlSecondsAfterFinished` (default 3600)
-- `controlPlane.dispatch.worker.restartPolicy` (default `Never`)
-- `controlPlane.dispatch.worker.terminationGraceSeconds`
-- `controlPlane.dispatch.worker.activeDeadlineSeconds`
+- `worker.job.namePrefix` (default `filament`)
+- `worker.job.backoffLimit` (default 1)
+- `worker.job.ttlSecondsAfterFinished` (default 3600)
+- `worker.job.restartPolicy` (default `Never`)
+- `worker.job.terminationGraceSeconds`
+- `worker.job.activeDeadlineSeconds`
+- `worker.replicas` (default 1) and `worker.resources` for the persistent worker
 
 For all worker settings, see the
 [Helm chart README](https://github.com/galaxy-io/filament/tree/main/charts/filament).
@@ -113,12 +134,13 @@ its own Job and resource configuration.
 
 ## Vendored dependencies
 
-The chart includes optional PostgreSQL, NATS, and Zitadel subcharts. All three
-are disabled by default:
+The chart includes optional PostgreSQL, NATS, Zitadel, and Keycloak subcharts.
+All four are disabled by default:
 
 - Bitnami PostgreSQL with an 8Gi PVC and optional daily `pg_dumpall` backups
 - NATS with JetStream and a 10Gi file store
 - Zitadel for authentication
+- Keycloak (codecentric keycloakx) for authentication
 
 <Warning>
 Use the vendored subcharts for local and test clusters. For production, use
@@ -127,13 +149,49 @@ managed services with lifecycles separate from Filament.
 
 Authentication is disabled by default. Set `auth.enabled: true`,
 `auth.uiOrigin`, and `auth.zitadel.issuer` to use Zitadel. An external Zitadel
-instance also requires `auth.zitadel.pat` or an `AUTH_PAT` entry in
-`existingSecret`. The vendored Zitadel setup mints its own token.
+instance also requires `auth.zitadel.pat` or an `AUTH_PAT` entry in the
+separate `auth.zitadel.existingSecret`. Without an existing provider Secret,
+the chart stores the PAT in `<release>-zitadel-auth`. The vendored Zitadel
+setup mints its own token.
+
 
 <Note>
 Do not use `--wait` when enabling the vendored Zitadel chart. Its setup Jobs
 must mint the server token before the server can become ready.
 </Note>
+
+Set `auth.type: keycloak` to use Keycloak. An external realm requires
+`auth.keycloak.issuer` and `auth.keycloak.clientSecret`, or a dedicated
+`keycloak.existingSecret` containing `AUTH_CLIENT_SECRET`.
+
+For vendored Keycloak, enable `keycloak.enabled` and supply
+`keycloak.hostname`, `auth.keycloak.clientSecret`, and
+`auth.keycloak.adminPassword`. The hostname is an HTTP(S) origin that must
+resolve inside the cluster as well as outside. Configure ingress TLS when
+using HTTPS. Enable the vendored PostgreSQL and set its password, or configure
+`keycloak.database` for an external database. The server creates the realm
+and client on boot using `keycloak.adminUser`.
+
+Keycloak credentials live in `<release>-keycloak-auth`, separately from the
+shared runtime Secret. To manage them outside Helm, put `AUTH_CLIENT_SECRET`
+and `AUTH_ADMIN_PASSWORD` in a dedicated Secret and set
+`keycloak.existingSecret` to its name. Set `auth.keycloak.bootstrap.clientId`
+and `clientSecret` to add an SDK admin service account to the bootstrap tenant;
+with an existing Secret, supply `AUTH_BOOTSTRAP_CLIENT_SECRET` there instead.
+
+### Bootstrap admin
+
+Set `auth.bootstrap.tenant`, `auth.bootstrap.adminEmail`, and
+`auth.bootstrap.adminPassword` with either provider. The server converges the
+tenant on every boot, creates the admin with that password the first time, and
+closes sign-up. Everyone else joins through the members page. The password
+lives in the provider Secret as `AUTH_BOOTSTRAP_ADMIN_PASSWORD`; with an
+existing provider Secret, supply that key there instead.
+
+Earlier chart versions stored `AUTH_PAT` in the runtime Secret; move it to the
+provider Secret on upgrade. Updating the
+bootstrap admin password value does not rotate it in Keycloak: change the
+password in Keycloak first, then update the Secret and restart the server.
 
 ## Chart reference
 

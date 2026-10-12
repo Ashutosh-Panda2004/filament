@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -198,6 +199,8 @@ func factProgress(f events.Fact) (records, bytes int64, errMsg string, hasProgre
 		return 0, 0, d.Error, false
 	case events.RunFailedEvent:
 		return 0, 0, d.Error, false
+	case events.StreamAttemptEndedEvent:
+		return 0, 0, d.Error, false
 	case events.RunPartialEvent:
 		return 0, 0, d.Error, false
 	case events.RetryExhaustedEvent:
@@ -228,6 +231,12 @@ func emitAt[T any](e *emitter, t events.EventType[T], resource string, at time.T
 func sourceObserver(e *emitter) filament.SourceObserver {
 	return func(progress filament.SourceProgress) {
 		switch progress.Kind {
+		case filament.SourceProgressExportJobCreated:
+			emit(e, events.ExportJobCreated, progress.Resource, events.ExportJobCreatedEvent(progress.ExportJob))
+		case filament.SourceProgressExportJobPolled:
+			emit(e, events.ExportJobPolled, progress.Resource, events.ExportJobPolledEvent(progress.ExportJob))
+		case filament.SourceProgressExportJobReady:
+			emit(e, events.ExportJobReady, progress.Resource, events.ExportJobReadyEvent(progress.ExportJob))
 		case filament.SourceProgressPageFetched:
 			emit(e, events.PageFetched, progress.Resource, events.PageFetchedEvent{
 				Records: progress.Records,
@@ -274,6 +283,22 @@ func (e *emitter) failed(err error, resources []string, resumable bool) {
 	if resumable {
 		e.partial(err)
 		return
+	}
+	e.fail(err)
+}
+
+// failedAt is failed for a run that died on one resource before extraction:
+// that resource carries the cause, the rest are marked aborted on its account,
+// and the run fails. Every announced resource still gets its terminal.
+func (e *emitter) failedAt(err error, resource string, resources []string) {
+	defer e.finish()()
+	aborted := fmt.Sprintf("aborted: resource %q failed", resource)
+	for _, res := range resources {
+		message := aborted
+		if res == resource {
+			message = err.Error()
+		}
+		emit(e, events.ResourceFailed, res, events.ResourceFailedEvent{Error: message})
 	}
 	e.fail(err)
 }

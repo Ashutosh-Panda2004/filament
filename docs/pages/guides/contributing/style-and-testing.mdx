@@ -15,7 +15,7 @@ just lint            # run linters with --fix
 just lint check      # verify without fixing
 ```
 
-Go formatting uses `gofumpt` and `goimports`; Go linting is configured in
+Go formatting uses `gofumpt` and `goimports`. Go linting is configured in
 `.golangci.yaml`. Biome handles the UI, and Buf handles protobuf formatting and
 linting. Refer to those configuration files when you need the exact enabled
 rules.
@@ -26,31 +26,37 @@ CI runs the granular recipes (`just go-lint check`, `just go-format check`,
 
 ## Testing
 
-There are three layers of tests, run by two commands.
+There are three layers of tests.
 
 **`just test`** runs unit tests in every Go module except `tests/`. It does not
-need Docker. The suite covers planning, batching and integrity, checkpoints,
-event delivery, connectors, storage, secrets, the runner, and the server.
+need a container engine. The suite covers planning, batching and integrity,
+checkpoints, event delivery, connectors, storage, secrets, the runner, and the server.
 
 **`just test-integration`** recursively runs service-level contracts under
 `tests/integration/`, carrying `//go:build integration`. **`just test-e2e`**
 recursively runs cross-process, data-lake, and Kubernetes workflows under
-`tests/e2e/`, carrying `//go:build e2e`.
-Both need Docker because Testcontainers provisions their dependencies; the e2e
-suite also needs `duckdb` on your PATH for TPC-H seeding.
+`tests/e2e/`, carrying `//go:build e2e`. Kubernetes tests additionally carry
+`//go:build privileged` because their nested cluster needs a privileged engine.
+Both use Testcontainers with Docker or Podman. The e2e suite also needs
+`duckdb` on your PATH for TPC-H seeding.
 
 <Warning>
 Running `go test ./...` in `tests/` without a test tier tag can pass while
-testing nothing. Use `just test-integration` or `just test-e2e`; each supplies
+testing nothing. Use `just test-integration` or `just test-e2e`. Each supplies
 the appropriate tag.
 </Warning>
+
+The selected `CONTAINER_ENGINE` applies to both suites. See
+[local development](/pages/guides/contributing/local-development) for engine selection.
+The default `just test-e2e` invocation includes the privileged tag. To exercise
+every compatible e2e package without it, run `just test-e2e e2e`.
 
 ### What the suites prove
 
 The integration suite checks behavior across real dependencies:
 
 - Recovery tests stop runs during extraction and write new source rows before
-  resume. Missing rows fail the test; duplicate rows are allowed by the
+  resume. Missing rows fail the test. Duplicate rows are allowed by the
   at-least-once contract.
 - PostgreSQL and MySQL connector tests cover snapshot, incremental, and CDC
   behavior, including physical-scan resume after table changes.
@@ -64,3 +70,17 @@ write PostgreSQL data to Iceberg and verify it independently through Trino.
 Pipeline tests exercise the server API and separately run compiled server and
 control-plane processes through PostgreSQL and NATS. Kubernetes tests verify
 dispatch, idempotency, and stale-run reaping against a real k3s API server.
+
+## Pull request titles and releases
+
+Pull requests squash-merge with the title as the commit message, and the
+title must follow [Conventional Commits](https://www.conventionalcommits.org):
+`feat(charts): ...`, `fix(sdks/python): ...`, `chore(ci): ...`. A check on
+every pull request enforces the format.
+
+Release Please reads those commits on `main` and keeps one release pull
+request open. It collects the changes since the last release and bumps each
+package that changed: the platform, the Python SDK, and the TypeScript SDK.
+Merging it creates the tags and GitHub releases, and each tag runs the publish
+workflow for its package. The Helm chart carries the platform's version and
+ships with every platform release, after the images it deploys.

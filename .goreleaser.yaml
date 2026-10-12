@@ -53,6 +53,7 @@ homebrew_casks:
     commit_author:
       name: gx-null[bot]
       email: 286761379+gx-null[bot]@users.noreply.github.com
+    skip_upload: auto
     homepage: "https://github.com/galaxy-io/filament"
     description: "Pluggable data replication with checkpointing, batching, and integrity events"
     binaries:

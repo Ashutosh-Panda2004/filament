@@ -1,0 +1,245 @@
+version: 1
+name: linear
+display_name: Linear
+description: Product development system for planning and building software, with issue tracking and roadmaps that help teams coordinate work from idea to launch.
+dark_logo_url: https://cdn.getgalaxy.io/sources/source-icon-linear-dark.svg
+light_logo_url: https://cdn.getgalaxy.io/sources/source-icon-linear-light.svg
+config:
+  api_key:
+    type: secret
+    required: true
+    help: Linear API key
+connection:
+  base_url: https://api.linear.app
+  auth:
+    header:
+      name: Authorization
+      value: config.api_key
+defaults:
+  response:
+    error:
+      path: errors
+      when_present: true
+      message_path: errors.0.message
+resources:
+  - name: teams
+    path: /graphql
+    method: POST
+    primary_key: [id]
+    fields:
+      id: string
+      key: string?
+      name: string
+      created_at: {path: createdAt, type: timestamptz, nullable: true}
+      updated_at: {path: updatedAt, type: timestamptz}
+      raw: {path: $, type: json, mode: remainder}
+    body:
+      encoding: json
+      template:
+        query: |
+          query Teams($first: Int!, $after: String, $updatedAfter: DateTimeOrDuration!) {
+            teams(first: $first, after: $after, includeArchived: true, orderBy: updatedAt, filter: { updatedAt: { gt: $updatedAfter } }) {
+              nodes { id key name createdAt updatedAt }
+              pageInfo { hasNextPage endCursor }
+            }
+          }
+        variables:
+          first: 100
+          updatedAfter: "1970-01-01T00:00:00Z"
+    response:
+      records: $.data.teams.nodes
+      pagination:
+        cursor:
+          response: data.teams.pageInfo.endCursor
+          request: body.variables.after
+          more: data.teams.pageInfo.hasNextPage
+          null_terminates: true
+    incremental:
+      cursor_field: updated_at
+      start_param: variables.updatedAfter
+      inject_into: body
+      initial: "1970-01-01T00:00:00Z"
+      checkpoint_key: teams_updated_at
+      comparator: time
+  - name: users
+    path: /graphql
+    method: POST
+    primary_key: [id]
+    fields:
+      id: string
+      name: string?
+      display_name: {path: displayName, type: string, nullable: true}
+      email: string?
+      created_at: {path: createdAt, type: timestamptz, nullable: true}
+      updated_at: {path: updatedAt, type: timestamptz}
+      raw: {path: $, type: json, mode: remainder}
+    body:
+      encoding: json
+      template:
+        query: |
+          query Users($first: Int!, $after: String, $updatedAfter: DateTimeOrDuration!) {
+            users(first: $first, after: $after, includeArchived: true, includeDisabled: true, orderBy: updatedAt, filter: { updatedAt: { gt: $updatedAfter } }) {
+              nodes { id name displayName email createdAt updatedAt }
+              pageInfo { hasNextPage endCursor }
+            }
+          }
+        variables:
+          first: 100
+          updatedAfter: "1970-01-01T00:00:00Z"
+    response:
+      records: $.data.users.nodes
+      pagination:
+        cursor:
+          response: data.users.pageInfo.endCursor
+          request: body.variables.after
+          more: data.users.pageInfo.hasNextPage
+          null_terminates: true
+    incremental:
+      cursor_field: updated_at
+      start_param: variables.updatedAfter
+      inject_into: body
+      initial: "1970-01-01T00:00:00Z"
+      checkpoint_key: users_updated_at
+      comparator: time
+  - name: projects
+    path: /graphql
+    method: POST
+    primary_key: [id]
+    fields:
+      id: string
+      name: string
+      description: string?
+      url: string?
+      created_at: {path: createdAt, type: timestamptz, nullable: true}
+      updated_at: {path: updatedAt, type: timestamptz}
+      raw: {path: $, type: json, mode: remainder}
+    body:
+      encoding: json
+      template:
+        query: |
+          query Projects($first: Int!, $after: String, $updatedAfter: DateTimeOrDuration!) {
+            projects(first: $first, after: $after, includeArchived: true, orderBy: updatedAt, filter: { updatedAt: { gt: $updatedAfter } }) {
+              nodes { id name description url createdAt updatedAt }
+              pageInfo { hasNextPage endCursor }
+            }
+          }
+        variables:
+          first: 100
+          updatedAfter: "1970-01-01T00:00:00Z"
+    response:
+      records: $.data.projects.nodes
+      pagination:
+        cursor:
+          response: data.projects.pageInfo.endCursor
+          request: body.variables.after
+          more: data.projects.pageInfo.hasNextPage
+          null_terminates: true
+    incremental:
+      cursor_field: updated_at
+      start_param: variables.updatedAfter
+      inject_into: body
+      initial: "1970-01-01T00:00:00Z"
+      checkpoint_key: projects_updated_at
+      comparator: time
+  - name: issues
+    path: /graphql
+    method: POST
+    primary_key: [id]
+    fields:
+      id: string
+      identifier: string?
+      number: int64?
+      title: string
+      description: string?
+      priority: int64?
+      estimate: float64?
+      url: string?
+      branch_name: {path: branchName, type: string, nullable: true}
+      created_at: {path: createdAt, type: timestamptz, nullable: true}
+      updated_at: {path: updatedAt, type: timestamptz}
+      completed_at: {path: completedAt, type: timestamptz, nullable: true}
+      archived_at: {path: archivedAt, type: timestamptz, nullable: true}
+      canceled_at: {path: canceledAt, type: timestamptz, nullable: true}
+      team_id: {path: team.id, type: string, nullable: true}
+      team_key: {path: team.key, type: string, nullable: true}
+      team:
+        type: json
+        nullable: true
+        shape:
+          id: team.id
+          key: team.key
+          name: team.name
+      state_id: {path: state.id, type: string, nullable: true}
+      state:
+        type: json
+        nullable: true
+        shape:
+          id: state.id
+          name: state.name
+          type: state.type
+      assignee_id: {path: assignee.id, type: string, nullable: true}
+      assignee:
+        type: json
+        nullable: true
+        shape:
+          id: assignee.id
+          name: assignee.name
+          display_name: assignee.displayName
+          email: assignee.email
+      creator_id: {path: creator.id, type: string, nullable: true}
+      creator:
+        type: json
+        nullable: true
+        shape:
+          id: creator.id
+          name: creator.name
+          display_name: creator.displayName
+          email: creator.email
+      project_id: {path: project.id, type: string, nullable: true}
+      project:
+        type: json
+        nullable: true
+        shape:
+          id: project.id
+          name: project.name
+      labels: {path: labels.nodes, type: json, nullable: true}
+      raw: {path: $, type: json, mode: remainder}
+    body:
+      encoding: json
+      template:
+        query: |
+          query Issues($first: Int!, $after: String, $updatedAfter: DateTimeOrDuration!) {
+            issues(first: $first, after: $after, includeArchived: true, orderBy: updatedAt, filter: { updatedAt: { gt: $updatedAfter } }) {
+              nodes {
+                id identifier number title description priority estimate url branchName
+                createdAt updatedAt completedAt archivedAt canceledAt
+                team { id key name }
+                state { id name type }
+                assignee { id name displayName email }
+                creator { id name displayName email }
+                project { id name }
+                labels(first: 50) { nodes { id name color } }
+              }
+              pageInfo { hasNextPage endCursor }
+            }
+          }
+        variables:
+          first: 100
+          updatedAfter: "1970-01-01T00:00:00Z"
+    response:
+      records: $.data.issues.nodes
+      pagination:
+        cursor:
+          response: data.issues.pageInfo.endCursor
+          request: body.variables.after
+          more: data.issues.pageInfo.hasNextPage
+          null_terminates: true
+    incremental:
+      cursor_field: updated_at
+      start_param: variables.updatedAfter
+      inject_into: body
+      initial: "1970-01-01T00:00:00Z"
+      checkpoint_key: issues_updated_at
+      comparator: time
+discovery:
+  mode: static

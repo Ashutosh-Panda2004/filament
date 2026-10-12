@@ -2,6 +2,7 @@ package filament
 
 import (
 	"context"
+	"time"
 
 	"github.com/galaxy-io/filament/arrowbatch"
 )
@@ -21,6 +22,9 @@ type Sink interface {
 
 // ApplyOptions carries the per-resource write policy governing one Apply.
 type ApplyOptions struct {
+	// Epoch is nil for bounded writes. Native sinks reject writes that do not
+	// match the currently open epoch; this is not destination fencing.
+	Epoch  *EpochRef
 	Policy WritePolicy
 }
 
@@ -31,13 +35,9 @@ type Transactional interface {
 	Promote(ctx context.Context, id StageID) error
 }
 
-// Upsertable is the optional sink contract for key-based merge writes.
-type Upsertable interface {
-	Upsert(ctx context.Context, b *arrowbatch.Batch, keys []string) (WriteReceipt, error)
-}
-
 // Schematized is the optional sink contract for typed DDL: materialize a
-// resource's schema before its records arrive.
+// resource's schema before its records arrive. The runner supplies destination
+// resource names consistently to Open, EnsureSchema, and Apply.
 type Schematized interface {
 	EnsureSchema(ctx context.Context, resource string, schema RecordSchema) error
 }
@@ -65,8 +65,8 @@ type SinkSpec struct {
 // SinkCapabilities advertises the optional contracts and write modes a sink
 // supports, so the engine can match it to an ingestion type.
 type SinkCapabilities struct {
+	Stream        *StreamingSinkCapabilities
 	Transactional bool
-	Upsertable    bool
 	Schematized   bool
 	// EncodedIntegrity requires Apply to verify the final serialized bytes at
 	// its write boundary and return the resulting EncodedCRC as evidence.
@@ -76,4 +76,11 @@ type SinkCapabilities struct {
 	// run does not set Options.BatchMaxRows.
 	// 0 defers to the engine default.
 	PreferredBatchRows int
+	// PreferredBatchBytes is the sink's preferred approximate unencoded value
+	// bytes per Apply, used when the run does not set Options.BatchMaxBytes.
+	// 0 leaves batches unbounded by bytes.
+	PreferredBatchBytes int64
+	// PreferredFlushInterval is used when the pipeline does not explicitly
+	// choose a flush interval. Zero uses the engine default.
+	PreferredFlushInterval time.Duration
 }

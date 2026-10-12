@@ -19,6 +19,7 @@ import (
 	"github.com/galaxy-io/filament/eventbus"
 	"github.com/galaxy-io/filament/events"
 	"github.com/galaxy-io/filament/pipeline"
+	"github.com/galaxy-io/filament/transform"
 )
 
 // abortWait bounds sink cleanup after a failed run. Detached from run
@@ -29,44 +30,30 @@ const abortWait = 30 * time.Second
 // Deps are the process-local dependencies needed to execute one run. Tracer is
 // optional; a nil one skips span reporting.
 type Deps struct {
-	Bus       eventbus.Bus
-	DataStore filament.DataStore
-	Secrets   filament.Secrets
-	Sources   filament.SourceRegistry
-	Sinks     filament.SinkRegistry
-	Log       filament.Logger
-	Tracer    filament.Tracer
+	Bus         eventbus.Bus
+	DataStore   filament.DataStore
+	StreamStore filament.ContinuousRunStore
+	Secrets     filament.Secrets
+	Sources     filament.SourceRegistry
+	Sinks       filament.SinkRegistry
+	Log         filament.Logger
+	Tracer      filament.Tracer
 }
 
 // SpecFromState builds the RunSpec to execute from a persisted run state.
 func SpecFromState(s filament.RunState) filament.RunSpec {
-	r := s.Request
-	return filament.RunSpec{
-		Tenant: r.Tenant, Run: s.Run, StartedAt: s.StartedAt,
-		PipelineID: r.PipelineID, PipelineVersionID: r.PipelineVersionID,
-		SourceConnectionID: r.SourceConnectionID, SinkConnectionID: r.SinkConnectionID,
-		CheckpointRoute:   r.CheckpointRoute,
-		ReplicationStream: r.ReplicationStream,
-		CursorConfigs:     r.CursorConfigs,
-		Source:            r.Source, Sink: r.Sink, Resources: r.Resources, Selectors: r.Selectors,
-		IngestionTypes: r.IngestionTypes, Options: r.Options,
-		WorkerConfiguration: r.WorkerConfiguration,
-	}
+	return s.ExecutionSpec()
 }
 
 // ShouldRun reports whether a persisted run is this attempt's to execute. Only a
 // freshly requested or resumable-partial run qualifies, so a redelivered trigger
 // for a run already running or finished is a no-op rather than duplicated work.
-//
-// A completed CDC run is the exception: it is a catch-up cycle by construction,
-// so re-requesting it continues the change stream from its persisted cursor,
-// draining the source up to a fresh watermark and completing again.
+// Each new CDC catch-up has its own run and resumes from the route checkpoint;
+// a completed run must not be resurrected by a late trigger redelivery.
 func ShouldRun(state filament.RunState) bool {
 	switch state.Status {
 	case filament.RunRequested, filament.RunPartial:
 		return true
-	case filament.RunCompleted:
-		return filament.IsCDC(state.Request.IngestionTypes)
 	default:
 		return false
 	}
@@ -82,6 +69,18 @@ func ShouldRun(state filament.RunState) bool {
 //
 //nolint:funlen,gocyclo // the run lifecycle reads best as one sequence
 func RunOne(ctx context.Context, deps Deps, spec filament.RunSpec) error {
+	if err := spec.Options.Execution.Validate(); err != nil {
+		return err
+	}
+	// Reject conflicting supplied ownership before any execution side effects.
+	if spec.StreamAttempt != nil {
+		if err := spec.ValidateStreamAttempt(); err != nil {
+			return err
+		}
+	}
+	if spec.Options.Execution.Normalize() == filament.ExecutionContinuous {
+		return filament.ErrContinuousDisabled
+	}
 	deps.Log = scopedRunLogger(deps.Log, spec)
 	ctx, span, endSpan := startRunSpan(ctx, deps, spec)
 	defer endSpan()
@@ -148,6 +147,7 @@ func RunOne(ctx context.Context, deps Deps, spec filament.RunSpec) error {
 		return nil
 	}
 	spec.WritePolicies = plan.WritePolicies
+	spec.IngestionTypes = plan.IngestionTypes
 	if plan.RequiresCDC && spec.ReplicationStream != nil && spec.ReplicationStream.ID != "" {
 		replicationStreamStore, ok := deps.DataStore.(filament.ReplicationStreamStore)
 		if !ok {
@@ -170,7 +170,22 @@ func RunOne(ctx context.Context, deps Deps, spec filament.RunSpec) error {
 	if incremental, checkpointed := partitionCheckpointing(spec); plan.RequiresCDC || len(incremental) > 0 || len(checkpointed) > 0 {
 		spec.Options.SnapshotParallelism = 1
 	}
-	if err := snk.Open(extractCtx, spec); err != nil {
+	// Resource preparation is part of the run's visible work. Announce resources
+	// before schema discovery and destination DDL so observers do not show an
+	// active run with every resource still waiting during a slow sink startup.
+	for _, res := range spec.Resources {
+		emit(em, events.ResourceStarted, res, events.ResourceStartedEvent{})
+	}
+
+	sinkSpec, schemas, err := prepareSinkResources(extractCtx, src, snk, &spec, nil)
+	if err != nil {
+		if emitControlledIfStopped(extractCtx, err, control, em) {
+			return nil
+		}
+		em.failed(fmt.Errorf("prepare sink resources: %w", err), nil, false)
+		return nil
+	}
+	if err := snk.Open(extractCtx, sinkSpec); err != nil {
 		if emitControlledIfStopped(extractCtx, err, control, em) {
 			return nil
 		}
@@ -178,21 +193,33 @@ func RunOne(ctx context.Context, deps Deps, spec filament.RunSpec) error {
 		return nil
 	}
 
+	// The transform definition is parsed once here and compiled per resource
+	// twice: against the discovered schema for sink DDL, and again inside the
+	// pipeline when each resource's first builder opens.
+	var transformDef *transform.Definition
+	if spec.Transform != "" {
+		if transformDef, err = transform.Parse([]byte(spec.Transform)); err != nil {
+			abortSink(ctx, deps, snk)
+			em.failed(fmt.Errorf("transform: %w", err), spec.Resources, false)
+			return nil
+		}
+	}
+
 	// A schema-aware sink needs typed DDL before any write. When the source can
 	// supply per-resource schemas, ensure each one up front so a Schematized sink
 	// (e.g. iceberg, postgres) creates/evolves its tables before extraction.
-	if err := ensureSchemas(extractCtx, src, snk, spec); err != nil {
+	if err := ensureSchemas(extractCtx, snk, spec, schemas, transformDef); err != nil {
 		abortSink(ctx, deps, snk)
 		if emitControlledIfStopped(extractCtx, err, control, em) {
 			return nil
 		}
-		em.failed(fmt.Errorf("ensure schema: %w", err), nil, false)
+		var re *resourceError
+		if errors.As(err, &re) {
+			em.failedAt(fmt.Errorf("ensure schema: %w", err), re.resource, spec.Resources)
+			return nil
+		}
+		em.failed(fmt.Errorf("ensure schema: %w", err), spec.Resources, false)
 		return nil
-	}
-
-	// Announce the resources this run will touch (when known up front).
-	for _, res := range spec.Resources {
-		emit(em, events.ResourceStarted, res, events.ResourceStartedEvent{})
 	}
 
 	extractor, err := resolveExtractor(extractCtx, deps.DataStore, src, spec, plan, deps.Log)
@@ -215,9 +242,10 @@ func RunOne(ctx context.Context, deps Deps, spec filament.RunSpec) error {
 		Sink:          snk,
 		Emit:          func(f events.Fact) { _ = em.publish(f) },
 		NextSeq:       em.next,
-		WritePolicies: plan.WritePolicies,
+		WritePolicies: spec.WritePolicies,
 		Options:       spec.Options,
 		Log:           deps.Log,
+		Transform:     transformDef,
 		Audit: &pipeline.AuditConfig{
 			RunStartedAt: runStartedAt,
 			CDC:          plan.RequiresCDC,

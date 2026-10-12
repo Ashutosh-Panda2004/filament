@@ -5,12 +5,19 @@ package connectors
 import (
 	// Each blank import registers that connector's sources and sinks with
 	// the default registry from init().
+	_ "github.com/galaxy-io/filament/connectors/bigquery"
 	_ "github.com/galaxy-io/filament/connectors/clickhouse"
 	_ "github.com/galaxy-io/filament/connectors/http"
+	_ "github.com/galaxy-io/filament/connectors/hubspot"
 	_ "github.com/galaxy-io/filament/connectors/iceberg"
+	_ "github.com/galaxy-io/filament/connectors/kafka"
+	_ "github.com/galaxy-io/filament/connectors/meilisearch"
 	_ "github.com/galaxy-io/filament/connectors/mysql"
+	_ "github.com/galaxy-io/filament/connectors/nats"
 	_ "github.com/galaxy-io/filament/connectors/object"
 	_ "github.com/galaxy-io/filament/connectors/postgres"
+	_ "github.com/galaxy-io/filament/connectors/redshift"
 	_ "github.com/galaxy-io/filament/connectors/sample"
+	_ "github.com/galaxy-io/filament/connectors/snowflake"
 	_ "github.com/galaxy-io/filament/connectors/stdout"
 )

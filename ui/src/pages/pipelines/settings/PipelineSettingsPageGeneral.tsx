@@ -1,33 +1,30 @@
-import { useState } from "react";
+import { type FC, useState } from "react";
 
 import { create } from "@bufbuild/protobuf";
-import { useParams } from "@tanstack/react-router";
 
-import Accordion from "@galaxy-io/dls/accordion/Accordion";
-import Button from "@galaxy-io/dls/buttons/Button";
-import FlexWrapper, {
-  FlexDirection,
-  FlexGap,
-  JustifyContent,
-} from "@galaxy-io/dls/containers/FlexWrapper";
-import { InputSize } from "@galaxy-io/dls/inputs/Input";
+import Button, { ButtonVariant } from "@galaxy-io/dls/buttons/Button";
+import CopyInput from "@galaxy-io/dls/inputs/CopyInput";
 import TextAreaInput from "@galaxy-io/dls/inputs/TextAreaInput";
 import TextInput from "@galaxy-io/dls/inputs/TextInput";
+import Flex, { AlignItems, FlexDirection, JustifyContent } from "@galaxy-io/dls/layout/Flex";
+import { FontFamily } from "@galaxy-io/dls/theme/enums";
 import { ToastVariant } from "@galaxy-io/dls/toast/Toast";
 import { useToast } from "@galaxy-io/dls/toast/useToast";
+import Widget from "@galaxy-io/dls/widget/Widget";
+
+import { type Pipeline, UpdatePipelineRequestSchema } from "@/gen/ingestion/v1/pipelines_pb";
+
+import { formatDeletedName, formatPipelineName } from "@/components/pipelines/utils";
+
+import { usePipelineParams } from "@/module/hooks";
 
 import {
-  GetPipelineRequestSchema,
-  type Pipeline,
-  UpdatePipelineRequestSchema,
-} from "@/gen/ingestion/v1/pipelines_pb";
-
-import { formatPipelineName } from "@/pages/pipelines/utils";
-
-import { useSuspenseGetPipelineQuery, useUpdatePipelineMutation } from "@/api/queries/pipelines";
+  createGetPipelineInput,
+  useSuspenseGetPipelineQuery,
+  useUpdatePipelineMutation,
+} from "@/api/queries/pipelines";
 
 import { getErrorMessage } from "@/utils/errors";
-import { stripDeletedName } from "@/utils/format";
 
 interface PipelineSettingsPageGeneralState {
   name: Pipeline["name"];
@@ -39,26 +36,28 @@ const DEFAULT_STATE: PipelineSettingsPageGeneralState = {
   description: "",
 };
 
-const PipelineSettingsPageGeneral = () => {
-  const { showToast } = useToast();
-  const { id } = useParams({ from: "/_app/pipelines/$id" });
+const PipelineSettingsPageGeneral: FC = () => {
+  const { toast } = useToast();
+  const { id } = usePipelineParams();
 
   const { data } = useSuspenseGetPipelineQuery({
-    input: create(GetPipelineRequestSchema, { id }),
+    input: createGetPipelineInput(id),
   });
   const pipeline = data.pipeline;
 
   const { mutate: updatePipeline, isPending: isSaving } = useUpdatePipelineMutation();
 
-  const [state, setState] = useState<PipelineSettingsPageGeneralState>(() => ({
+  const createInitialState = (): PipelineSettingsPageGeneralState => ({
     ...DEFAULT_STATE,
-    name: stripDeletedName(pipeline?.name ?? ""),
+    name: formatDeletedName(pipeline?.name ?? ""),
     description: pipeline?.description ?? "",
-  }));
+  });
+
+  const [state, setState] = useState<PipelineSettingsPageGeneralState>(createInitialState);
 
   if (!pipeline) return null;
 
-  const pipelineName = stripDeletedName(pipeline.name);
+  const pipelineName = formatDeletedName(pipeline.name);
 
   const handleNameChange = (name: string) => {
     setState((prev) => ({ ...prev, name }));
@@ -73,25 +72,29 @@ const PipelineSettingsPageGeneral = () => {
 
   const canSave = hasChanges && state.name.trim().length > 0;
 
+  const handleCancel = () => {
+    setState(createInitialState());
+  };
+
   const handleSave = () => {
     const request = create(UpdatePipelineRequestSchema, {
       pipelineId: pipeline.id,
       name: state.name.trim(),
       description: state.description.trim(),
+      executionMode: pipeline.executionMode,
     });
 
     updatePipeline(request, {
       onSuccess: () => {
-        showToast({
+        toast({
           header: "Pipeline saved",
-          subheader: "Your pipeline has been saved successfully.",
           variant: ToastVariant.SUCCESS,
         });
       },
       onError: (error) => {
-        showToast({
+        toast({
           header: "Save failed",
-          subheader: getErrorMessage(error, "Failed to save pipeline"),
+          description: getErrorMessage(error, "Failed to save pipeline"),
           variant: ToastVariant.ERROR,
         });
       },
@@ -99,12 +102,12 @@ const PipelineSettingsPageGeneral = () => {
   };
 
   return (
-    <Accordion header="General" isOpenInitial>
-      <FlexWrapper direction={FlexDirection.COLUMN} gap={FlexGap.MEDIUM} fillWidth>
+    <Widget isCollapsible header="General" defaultIsOpen>
+      <Flex alignItems={AlignItems.START} direction={FlexDirection.COLUMN} gap={12} fillWidth>
+        <CopyInput value={pipeline.id} label="ID" family={FontFamily.MONO} fillWidth />
         <TextInput
           value={state.name}
           onChange={handleNameChange}
-          size={InputSize.LARGE}
           placeholder={formatPipelineName(pipeline)}
           label="Name"
           fillWidth
@@ -112,16 +115,21 @@ const PipelineSettingsPageGeneral = () => {
         <TextAreaInput
           value={state.description}
           onChange={handleDescriptionChange}
-          size={InputSize.LARGE}
-          placeholder="Optional description"
+          placeholder="Add a description..."
           label="Description"
           fillWidth
         />
-        <FlexWrapper justifyContent={JustifyContent.END} fillWidth>
+        <Flex alignItems={AlignItems.START} justifyContent={JustifyContent.END} gap={8} fillWidth>
+          <Button
+            label="Cancel"
+            variant={ButtonVariant.SECONDARY}
+            isDisabled={!hasChanges || isSaving}
+            onClick={handleCancel}
+          />
           <Button label="Save" isDisabled={!canSave} isLoading={isSaving} onClick={handleSave} />
-        </FlexWrapper>
-      </FlexWrapper>
-    </Accordion>
+        </Flex>
+      </Flex>
+    </Widget>
   );
 };
 

@@ -1,9 +1,6 @@
 package rowmodel
 
-import (
-	"fmt"
-	"strings"
-)
+import "strings"
 
 // Filament reserves this namespace for row lineage materialized after source
 // fields. Audit fields remain nullable so existing destination tables can
@@ -16,14 +13,18 @@ const (
 	AuditSequenceField       = "_filament_sequence"
 )
 
+// IsReservedColumn reports whether name sits in the prefix Filament keeps for
+// its own audit columns.
+func IsReservedColumn(name string) bool {
+	return strings.HasPrefix(strings.ToLower(name), "_filament_")
+}
+
 // WithAuditFields returns an independently owned destination schema with
 // Filament's universal lineage fields and, for CDC, change-stream fields.
 func WithAuditFields(schema Schema, cdc bool) (Schema, error) {
 	out := schema.Clone()
-	for _, field := range out.Fields {
-		if strings.HasPrefix(strings.ToLower(field.Name), "_filament_") {
-			return Schema{}, fmt.Errorf("resource %q uses reserved Filament column %q", schema.Resource, field.Name)
-		}
+	if err := ValidateReservedFields(out); err != nil {
+		return Schema{}, err
 	}
 	out.Fields = append(out.Fields,
 		Field{Name: AuditRunIDField, Logical: LogicalString, Nullable: true},

@@ -1,24 +1,42 @@
 package httpapi
 
 import (
-	"github.com/galaxy-io/filament"
+	"fmt"
+	"os"
+
 	"github.com/galaxy-io/filament/registry"
 )
 
-// init registers the bundled manifest-driven SaaS catalog.
-// Enable with:
-//
-//	import _ "github.com/galaxy-io/filament/connectors/http"
-//
-// New SaaS connectors are a catalog/<name>.yaml manifest + one line here — no
-// new module, no new dependency.
+// Importing this package registers every version listed in the embedded catalog.
 func init() {
-	registry.RegisterSource("notion", filament.MaturityBeta, func() filament.Source { return NewNotion() })
-	registry.RegisterSource("linear", filament.MaturityBeta, func() filament.Source { return NewLinear() })
-	registry.RegisterSource("attio", filament.MaturityAlpha, func() filament.Source { return NewAttio() })
-	registry.RegisterSource("github", filament.MaturityBeta, func() filament.Source { return NewGitHub() })
-	registry.RegisterSource("slack", filament.MaturityAlpha, func() filament.Source { return NewSlack() })
-	registry.RegisterSource("resend", filament.MaturityBeta, func() filament.Source { return NewResend() })
-	registry.RegisterSource("stripe", filament.MaturityBeta, func() filament.Source { return NewStripe() })
-	registry.RegisterSource("posthog", filament.MaturityBeta, func() filament.Source { return NewPostHog() })
+	entries, err := loadCatalog(catalogFS)
+	if err != nil {
+		panic(err)
+	}
+	registerCatalog(registry.DefaultSources, entries)
+}
+
+// LoadDirectory loads a private catalog from directory/<connector>/registry.json
+// and directory/<connector>/<api-version>/manifest.yaml. It validates the whole
+// catalog before registration and captures file contents for this process's
+// lifetime. It does not mutate the bundled registry or watch for file changes.
+func LoadDirectory(directory string) (*registry.Sources, error) {
+	entries, err := loadCatalogRoot(os.DirFS(directory), ".")
+	if err != nil {
+		return nil, fmt.Errorf("HTTP manifest directory %q: %w", directory, err)
+	}
+	sources := registry.NewSources()
+	registerCatalog(sources, entries)
+	return sources, nil
+}
+
+func registerCatalog(sources *registry.Sources, entries []catalogEntry) {
+	for _, entry := range entries {
+		sources.RegisterWithMaturity(entry.key(), entry.maturity, entry.source)
+	}
+	for _, entry := range entries {
+		if entry.isDefault {
+			sources.RegisterAlias(entry.name, entry.key())
+		}
+	}
 }

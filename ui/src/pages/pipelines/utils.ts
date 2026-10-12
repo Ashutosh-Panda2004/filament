@@ -1,32 +1,55 @@
-import type { Requirement, ValidatePipelineResponse } from "@/gen/ingestion/v1/capabilities_pb";
-import type { Pipeline } from "@/gen/ingestion/v1/pipelines_pb";
+import type {
+  EdgeValidation,
+  Requirement,
+  ValidatePipelineResponse,
+} from "@/gen/ingestion/v1/capabilities_pb";
+import { ConnectorKind, type ExecutionMode } from "@/gen/ingestion/v1/common_pb";
+import type { Connection } from "@/gen/ingestion/v1/connections_pb";
+import type { PipelineVersion } from "@/gen/ingestion/v1/pipelines_pb";
+import {
+  ExecutionDesiredState,
+  type RunInfo,
+  RunSignal,
+  RunStatus,
+} from "@/gen/ingestion/v1/runs_pb";
 
-import { stripDeletedName } from "@/utils/format";
+import { PIPELINE_EXECUTION_MODES } from "@/pages/pipelines/constants";
 
-const getBlockingRequirementMessages = (requirements: Requirement[]): string[] =>
-  requirements
-    .filter((requirement) => requirement.blocking)
-    .map((requirement) => requirement.message);
+import { isContinuousRun } from "@/utils/runs";
+
+export const getSupportedExecutionModes = (source: Connection | null): ExecutionMode[] =>
+  source ? PIPELINE_EXECUTION_MODES.filter((mode) => source.executionModes.includes(mode)) : [];
+
+export const getRunPauseSignal = (run: RunInfo) => {
+  const isPaused = isContinuousRun(run)
+    ? run.executionStatus?.desiredState === ExecutionDesiredState.PAUSED
+    : run.status === RunStatus.PAUSED;
+  return isPaused ? RunSignal.RESUME : RunSignal.PAUSE;
+};
+
+export const getRunStopSignal = (run: RunInfo) =>
+  isContinuousRun(run) ? RunSignal.STOP : RunSignal.CANCEL;
+
+export const getEdgeBlockingRequirements = (edge: EdgeValidation): Requirement[] =>
+  [...edge.requirements, ...edge.resources.flatMap((resource) => resource.requirements)].filter(
+    (requirement) => requirement.blocking,
+  );
+
+export const getEdgeValidationErrors = (edge: EdgeValidation): string[] => [
+  ...edge.errors.map((error) => error.message),
+  ...getEdgeBlockingRequirements(edge).map((requirement) => requirement.message),
+];
 
 export const getPipelineValidationErrors = (
   validation: ValidatePipelineResponse | undefined,
 ): string[] => [
   ...new Set([
     ...(validation?.errors ?? []).map((error) => error.message),
-    ...(validation?.edges ?? []).flatMap((edge) => [
-      ...edge.errors.map((error) => error.message),
-      ...getBlockingRequirementMessages(edge.requirements),
-      ...edge.resources.flatMap((resource) =>
-        getBlockingRequirementMessages(resource.requirements),
-      ),
-    ]),
+    ...(validation?.edges ?? []).flatMap(getEdgeValidationErrors),
   ]),
 ];
 
-export const formatPipelineName = (pipeline: Pipeline, includeDeleted = false): string => {
-  const name = includeDeleted ? pipeline.name : stripDeletedName(pipeline.name);
-  if (name) {
-    return name.replace(/->/g, "→");
-  }
-  return pipeline.id;
-};
+export const isPipelineRunnable = (version: PipelineVersion | undefined): boolean =>
+  (version?.graph?.nodes ?? []).some((node) => node.kind === ConnectorKind.SOURCE) &&
+  (version?.graph?.nodes ?? []).some((node) => node.kind === ConnectorKind.SINK) &&
+  (version?.graph?.edges ?? []).length > 0;

@@ -13,6 +13,7 @@ import (
 
 	"github.com/galaxy-io/filament"
 	"github.com/galaxy-io/filament/app"
+	"github.com/galaxy-io/filament/cmd/internal/connectors"
 	"github.com/galaxy-io/filament/datastore/sqlite"
 	"github.com/galaxy-io/filament/datastore/sqlite/metrics"
 	secretenv "github.com/galaxy-io/filament/secret/env"
@@ -37,6 +38,15 @@ func (a *cliApp) markerPath() string { return filepath.Join(a.stateDir(), "filam
 // metrics over one handle, and secrets in the same database with env:NAME
 // references read through to the environment.
 func (a *cliApp) embeddedOptions() ([]app.Option, filament.Secrets, error) {
+	sources, err := connectors.SourcesFromEnv()
+	if err != nil {
+		return nil, nil, err
+	}
+	a.sources = sources
+	sinks, err := connectors.SinksFromEnv()
+	if err != nil {
+		return nil, nil, err
+	}
 	store, err := sqlite.Open(a.dbPath())
 	if err != nil {
 		return nil, nil, err
@@ -51,6 +61,9 @@ func (a *cliApp) embeddedOptions() ([]app.Option, filament.Secrets, error) {
 	}
 	secrets := layeredSecrets{stored: stored, env: secretenv.New()}
 	return []app.Option{
+		app.WithNotifier(),
+		app.WithSources(sources),
+		app.WithSinks(sinks),
 		app.WithDataStore(store),
 		app.WithMetricsStore(metrics.New(store.DB())),
 		app.WithSecrets(secrets),

@@ -12,8 +12,11 @@ import (
 // RunSpec is the fully resolved execution plan for one run — what a Runtime
 // receives after the engine has bound refs, ingestion type, and options.
 type RunSpec struct {
-	Tenant TenantID
-	Run    RunID
+	// StreamAttempt is authoritative for continuous execution. Existing dispatch
+	// fields, when populated, must agree with the admitted attempt.
+	StreamAttempt *AttemptRef `json:",omitempty"`
+	Tenant        TenantID
+	Run           RunID
 	// StartedAt is the logical run's first start time. A zero value is stamped by
 	// the runner; resumed executions retain the original value.
 	StartedAt time.Time
@@ -40,11 +43,17 @@ type RunSpec struct {
 	// WorkerConfiguration is the already-resolved worker shape for this run: the
 	// pipeline's configuration with the request's override folded in.
 	WorkerConfiguration WorkerConfiguration
+	// Transform is the yaml transform definition applied between source and
+	// sink; empty when the route has no transform node.
+	Transform string
 }
 
 // RunRequest is the caller-facing ask for a run, deduplicated by
 // IdempotencyKey; the engine resolves it into a RunSpec.
 type RunRequest struct {
+	// WritePolicies preserves continuous admission policies and destination-name
+	// overrides for bounded runs. Runtime negotiation binds bounded capabilities.
+	WritePolicies      map[string]WritePolicy `json:",omitempty"`
 	Tenant             TenantID
 	PipelineID         string
 	PipelineVersionID  string
@@ -70,6 +79,8 @@ type RunRequest struct {
 	// WorkerConfiguration is resolved at compile time and stamped here, so a
 	// later edit to the pipeline cannot reshape a run already requested.
 	WorkerConfiguration WorkerConfiguration `json:",omitzero"`
+	// Transform is the route's yaml transform definition, empty when none.
+	Transform string `json:",omitempty"`
 }
 
 // StreamRef identifies one admitted generation of a durable replication stream.
@@ -165,6 +176,8 @@ func (s RunSpec) ResourceCheckpointKey(resource string) (ResourceCheckpointKey, 
 // RunOptions tunes throughput knobs for a run; zero values defer to engine
 // defaults.
 type RunOptions struct {
+	Execution           ExecutionMode `json:",omitempty"`
+	EpochBoundary       *Boundary     `json:",omitempty"`
 	FetchSize           int
 	BatchMaxRows        int
 	BatchMaxBytes       int64
@@ -463,15 +476,10 @@ const (
 )
 
 // IngestionFor compiles the independent read and write levers into the
-// engine's internal ingestion type. Unspecified levers default to a full
-// replacement snapshot, except an incremental read defaults to upsert.
+// engine's internal ingestion type. An unspecified write mode defaults to upsert.
 func IngestionFor(read ReadMode, write WriteMode) (IngestionType, error) {
 	if write == "" {
-		if read == ModeIncremental {
-			write = WriteUpsert
-		} else {
-			write = WriteReplace
-		}
+		write = WriteUpsert
 	}
 	switch read {
 	case ModeFull:
@@ -529,6 +537,7 @@ type WriteAtomicity string
 
 // Atomicity units, smallest to largest.
 const (
+	AtomicityRecord   WriteAtomicity = "record"
 	AtomicityBatch    WriteAtomicity = "batch"
 	AtomicityResource WriteAtomicity = "resource"
 	AtomicityRun      WriteAtomicity = "run"
@@ -603,11 +612,13 @@ type VersionPolicy struct {
 // WritePolicy binds a capability to one resource's keys and checkpoint timing
 // — the per-resource contract handed to a sink via ApplyOptions.
 type WritePolicy struct {
-	Capability WritePolicyCapability
-	Resource   string
-	Keys       []string
-	Version    VersionPolicy
-	Checkpoint CheckpointPolicy
+	// DestinationResource overrides the sink name without changing source progress identity.
+	DestinationResource string
+	Capability          WritePolicyCapability
+	Resource            string
+	Keys                []string
+	Version             VersionPolicy
+	Checkpoint          CheckpointPolicy
 }
 
 // Accepts reports whether the capability admits op; an empty AcceptsOps
@@ -633,9 +644,20 @@ func (p WritePolicy) ValidateOps(resource string, ops []Operation) error {
 	return nil
 }
 
-// ValidateBatch rejects the first row whose immutable batch operation the
-// policy does not accept.
+// ValidateBatch checks keyed writes have non-null identity and rejects operations
+// the policy does not accept. Nullable source IDs remain valid for unkeyed writes.
 func (p WritePolicy) ValidateBatch(resource string, batch *arrowbatch.Batch) error {
+	if p.Capability.RequiresPK && batch.NumRows() > 0 {
+		for _, key := range p.Keys {
+			indices := batch.Rows().Schema().FieldIndices(key)
+			if len(indices) != 1 {
+				return fmt.Errorf("write policy %q requires key %q in resource %q", p.Capability.Mode, key, resource)
+			}
+			if batch.Rows().Column(indices[0]).NullN() > 0 {
+				return fmt.Errorf("write policy %q: resource %q contains null primary key %q; cannot safely reconcile these records", p.Capability.Mode, resource, key)
+			}
+		}
+	}
 	if len(p.Capability.AcceptsOps) == 0 {
 		return nil
 	}
@@ -674,8 +696,11 @@ type SourcePolicy struct {
 // IngestionPlan is the resolved policy set for a run: per-resource write
 // policies, each bound from its resource's own ingestion type.
 type IngestionPlan struct {
-	WritePolicies map[string]WritePolicy
-	RequiresCDC   bool
+	// IngestionTypes contains effective per-resource modes after keyless fallback.
+	IngestionTypes map[string]IngestionType
+	Ordering       Ordering
+	WritePolicies  map[string]WritePolicy
+	RequiresCDC    bool
 }
 
 // WritePolicyForIngestion derives the canonical sink-side policy for an
@@ -804,5 +829,23 @@ func CheckpointCoverageFor(resources []string, types map[string]IngestionType) C
 		return CheckpointCoverageAll
 	default:
 		return CheckpointCoverageSome
+	}
+}
+
+// ExecutionSpec snapshots persisted execution settings without resolving secrets.
+func (s RunState) ExecutionSpec() RunSpec {
+	r := s.Request
+	return RunSpec{
+		Tenant: r.Tenant, Run: s.Run, StartedAt: s.StartedAt,
+		PipelineID: r.PipelineID, PipelineVersionID: r.PipelineVersionID,
+		SourceConnectionID: r.SourceConnectionID, SinkConnectionID: r.SinkConnectionID,
+		CheckpointRoute:   r.CheckpointRoute,
+		ReplicationStream: r.ReplicationStream,
+		CursorConfigs:     r.CursorConfigs,
+		Source:            r.Source, Sink: r.Sink, Resources: r.Resources, Selectors: r.Selectors,
+		IngestionTypes: r.IngestionTypes, Options: r.Options,
+		WorkerConfiguration: r.WorkerConfiguration,
+		WritePolicies:       r.WritePolicies,
+		Transform:           r.Transform,
 	}
 }

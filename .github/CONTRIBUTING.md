@@ -17,7 +17,7 @@ You will need:
 - Go 1.26.4 or newer
 - Docker with Compose
 - `just`
-- Node.js 22 and pnpm 10 for UI changes
+- Node.js 22 and pnpm 12 for UI changes
 - `golangci-lint`, Buf, and sqlc for formatting, linting, and code generation
 
 On macOS, the repository's [`Brewfile`](../Brewfile) installs the toolchain:
@@ -77,13 +77,15 @@ just test
 Useful targeted commands include:
 
 ```sh
-just ui-dist          # Type-check and build the UI bundle
+just ui-build          # Type-check and build the UI bundle
 just build            # Generate and compile the full workspace
 just proto-lint       # Lint protobuf definitions
+just manifest-lint    # Check HTTP manifest YAML syntax and formatting
+just manifest-format  # Format HTTP manifest YAML
 just test-integration # Run Docker-backed integration and e2e tests
 ```
 
-Integration tests use testcontainers and require Docker. You can pin container image versions in `docker/.env` as described in [`tests/testcontainers/README.md`](../tests/testcontainers/README.md). Some TPC-H tests also require `duckdb` on `PATH`.
+Integration tests use Testcontainers and require Docker or configured Podman. See the [local development guide](https://filament.getgalaxy.io/pages/guides/contributing/local-development) for engine selection and setup. You can pin container image versions in `docker/.env` as described in [`tests/testcontainers/README.md`](../tests/testcontainers/README.md). Some TPC-H tests also require `duckdb` on `PATH`.
 
 For a small change, you may run the narrowest relevant package or test. List the exact commands in your pull request.
 

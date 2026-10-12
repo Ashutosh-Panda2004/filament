@@ -11,7 +11,9 @@
 # Web UI
 /ui/node_modules/
 /ui/dist/
+/ui/build/
 /ui/*.tsbuildinfo
+.pnpm-store/
 
 # Local/editor files
 .DS_Store

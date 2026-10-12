@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -14,6 +15,7 @@ import (
 	"github.com/galaxy-io/filament/arrowbatch"
 	"github.com/galaxy-io/filament/checkpoint"
 	"github.com/galaxy-io/filament/connectors/http/internal/atomicwatermark"
+	"github.com/galaxy-io/filament/connectors/http/internal/export"
 	"github.com/galaxy-io/filament/connectors/http/internal/scalar"
 	"github.com/galaxy-io/filament/connectors/http/manifest"
 	"github.com/galaxy-io/filament/connectors/http/pagination"
@@ -33,16 +35,18 @@ type selectorToken struct {
 
 // Source adapts the manifest-driven HTTP connector to ingestion's source API.
 type Source struct {
-	connector        *Connector
-	name             string
-	displayName      string
-	description      string
-	darkLogoURL      string
-	lightLogoURL     string
-	config           filament.ConfigSchema
-	embeddedManifest *manifest.Manifest
-	manifestErr      error
-	dynamicResources map[string]string
+	connector            *Connector
+	name                 string
+	displayName          string
+	description          string
+	darkLogoURL          string
+	lightLogoURL         string
+	apiVersion           string
+	registeredAPIVersion string
+	config               filament.ConfigSchema
+	embeddedManifest     *manifest.Manifest
+	manifestErr          error
+	dynamicResources     map[string]string
 	// incrementalResources is populated by PlanIncremental for the resources in
 	// the current run. It keeps durable watermark extraction distinct from
 	// ordinary within-run pagination resume.
@@ -76,7 +80,7 @@ func NewManifest(manifestData []byte) *Source {
 	}
 	return &Source{
 		name: m.Name, displayName: m.DisplayName, description: m.Description,
-		darkLogoURL: m.DarkLogoURL, lightLogoURL: m.LightLogoURL,
+		darkLogoURL: m.DarkLogoURL, lightLogoURL: m.LightLogoURL, apiVersion: m.APIVersion,
 		config: configSchemaFromManifest(m), embeddedManifest: m,
 	}
 }
@@ -96,13 +100,18 @@ func (s *Source) Spec() filament.ConnectorSpec {
 			filament.IngestionIncrementalUpsert,
 		)
 	}
+	version := s.registeredAPIVersion
+	if version == "" {
+		version = "1"
+	}
 	return filament.ConnectorSpec{
 		Name:           s.name,
 		DisplayName:    s.displayName,
 		Description:    s.description,
 		DarkLogoURL:    s.darkLogoURL,
 		LightLogoURL:   s.lightLogoURL,
-		Version:        "1",
+		Version:        version,
+		APIVersion:     s.apiVersion,
 		Modes:          modes,
 		SourcePolicies: filament.SourcePolicies(policies...),
 		Config:         s.config,
@@ -145,6 +154,32 @@ func (s *Source) Validate(cfg filament.Config) error {
 		return fmt.Errorf("%s source: parse manifest: %w", s.name, s.manifestErr)
 	}
 	for _, field := range s.config.Fields {
+		if condition := field.VisibleWhen; condition != nil {
+			value := cfg.String(condition.Field)
+			if !cfg.Has(condition.Field) {
+				for _, controller := range s.config.Fields {
+					if controller.Name == condition.Field {
+						value, _ = controller.Default.(string)
+						break
+					}
+				}
+			}
+			if !slices.Contains(condition.Values, value) {
+				continue
+			}
+		}
+		if field.Type == filament.FieldEnum && cfg.Has(field.Name) {
+			found := false
+			for _, option := range field.Enum {
+				if cfg.String(field.Name) == option.Value {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("%s source: invalid value for %s", s.name, field.Name)
+			}
+		}
 		if field.Required && !cfg.Has(field.Name) {
 			return fmt.Errorf("%s source: %s is required", s.name, field.Name)
 		}
@@ -157,6 +192,10 @@ func (s *Source) Validate(cfg filament.Config) error {
 		if field.Required && field.Type == filament.FieldList && listLen(cfg.Raw()[field.Name]) == 0 {
 			return fmt.Errorf("%s source: %s is required", s.name, field.Name)
 		}
+	}
+	if s.embeddedManifest != nil && s.embeddedManifest.Connection.Auth.Type == "select" {
+		_, err := buildAuth(s.embeddedManifest.Connection.Auth, credentialsFromConfig(cfg, s.embeddedManifest.Config), processEnvironment())
+		return err
 	}
 	return nil
 }
@@ -186,6 +225,15 @@ func configSchemaFromManifest(m *manifest.Manifest) filament.ConfigSchema {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	controllers := map[string]bool{}
+	for _, spec := range m.Config {
+		if spec.VisibleWhen != nil {
+			controllers[spec.VisibleWhen.Field] = true
+		}
+	}
+	// Put selectors before their dependents so form defaults and visibility
+	// resolve in one pass, as they do for native connectors.
+	sort.SliceStable(names, func(i, j int) bool { return controllers[names[i]] && !controllers[names[j]] })
 	fields := make([]filament.ConfigField, 0, len(names))
 	for _, name := range names {
 		spec := m.Config[name]
@@ -212,11 +260,19 @@ func configSchemaFromManifest(m *manifest.Manifest) filament.ConfigSchema {
 		}
 		options := make([]filament.EnumOption, len(spec.Enum))
 		for i, value := range spec.Enum {
-			options[i] = filament.EnumOption{Value: value, Label: value}
+			label := spec.EnumLabels[value]
+			if label == "" {
+				label = value
+			}
+			options[i] = filament.EnumOption{Value: value, Label: label}
+		}
+		var visibleWhen *filament.FieldCondition
+		if spec.VisibleWhen != nil {
+			visibleWhen = &filament.FieldCondition{Field: spec.VisibleWhen.Field, Values: append([]string(nil), spec.VisibleWhen.Values...)}
 		}
 		fields = append(fields, filament.ConfigField{
 			Name: name, Type: fieldType, Required: spec.Required, Default: spec.Default,
-			Enum: options, Help: spec.Help, Scope: scope, Secret: spec.Type == "secret",
+			Enum: options, Help: spec.Help, Scope: scope, Secret: spec.Type == "secret", VisibleWhen: visibleWhen,
 		})
 	}
 	return filament.ConfigSchema{Fields: fields}
@@ -306,12 +362,17 @@ func (s *Source) Discover(ctx context.Context, _ filament.DiscoverOpts) (filamen
 		out := make([]filament.Resource, 0, len(staticResources))
 		for _, r := range staticResources {
 			schema, _ := s.Schema(ctx, r.Name)
+			var metadata map[string]string
+			if defaults := s.connector.manifest.Discovery.DefaultResources; defaults != nil {
+				metadata = map[string]string{"default_resources": strconv.FormatBool(slices.Contains(defaults, r.Name))}
+			}
 			out = append(out, filament.Resource{
 				Name:       r.Name,
 				Selector:   r.Name,
 				Selectable: true,
 				PrimaryKey: append([]string(nil), r.PrimaryKey...),
 				Schema:     &schema,
+				Metadata:   metadata,
 			})
 		}
 		return filament.DiscoverResult{Resources: out}, nil
@@ -323,20 +384,38 @@ func (s *Source) Discover(ctx context.Context, _ filament.DiscoverOpts) (filamen
 func (s *Source) Extract(ctx context.Context, sink arrowbatch.Inlet, opts filament.ExtractOpts) error {
 	s.incrementalResources = nil
 	s.incrementalLookbacks = nil
-	return s.extract(ctx, sink, opts, nil, nil)
+	return s.extract(ctx, sink, opts, nil, nil, nil)
 }
 
 // ExtractFrom resumes extraction from per-resource keyset checkpoints,
 // decoding them into resume cursors and watermarks.
 func (s *Source) ExtractFrom(ctx context.Context, sink arrowbatch.Inlet, opts filament.ExtractOpts, prev map[string]filament.Checkpoint) error {
+	resumeExports := make(map[string]string)
 	resumeStates := make(map[string]pagination.State, len(prev))
 	resumeWatermarks := make(map[string]map[string]string, len(prev))
 	for resource, cp := range prev {
 		ks, ok := checkpoint.ParseKeyset(cp)
+		if res, found := s.manifestResource(resource); found && res.Mode == "export" {
+			if export.Scoped(res) {
+				inc := ks.Mode == checkpoint.ModeIncremental
+				if _, err := s.exportPlanState(res, cp, inc); err != nil {
+					return err
+				}
+				if inc && (res.Incremental == nil || s.incrementalResources[resource].CursorField == "") {
+					return fmt.Errorf("export %s requires incremental planning before extraction", resource)
+				}
+			} else if !ok || ks.Mode != checkpoint.ModeKeyset || !slices.Equal(ks.Cols, []string{"export_state"}) || len(ks.Shards) != 1 {
+				return fmt.Errorf("export %s: incompatible checkpoint", resource)
+			}
+		}
 		if !ok || len(ks.Shards) == 0 || len(ks.Shards[0].Key) == 0 {
 			continue
 		}
 		key := ks.Shards[0].Key
+		if res, ok := s.manifestResource(resource); ok && res.Mode == "export" {
+			resumeExports[resource] = key[0]
+			continue
+		}
 		if ks.Mode == checkpoint.ModeIncremental {
 			for i, checkpointKey := range ks.Cols {
 				if i >= len(key) || key[i] == "" {
@@ -364,7 +443,7 @@ func (s *Source) ExtractFrom(ctx context.Context, sink arrowbatch.Inlet, opts fi
 			resumeWatermarks[resource][checkpointKey] = key[i+1]
 		}
 	}
-	return s.extract(ctx, sink, opts, resumeStates, resumeWatermarks)
+	return s.extract(ctx, sink, opts, resumeStates, resumeWatermarks, resumeExports)
 }
 
 // PlanResources resolves requested resources and selectors to manifest resource names.
@@ -387,7 +466,30 @@ func (s *Source) PlanResume(_ context.Context, resources []string, prev map[stri
 	}
 	plan := make(map[string]filament.Checkpoint, len(resources))
 	for _, resource := range resources {
+		if res, ok := s.manifestResource(resource); ok && export.Scoped(res) {
+			state, err := s.exportPlanState(res, prev[resource], false)
+			if err != nil {
+				return nil, err
+			}
+			cp, err := export.Checkpoint(resource, state)
+			if err != nil {
+				return nil, err
+			}
+			plan[resource] = cp
+			continue
+		}
 		cols := []string{"pagination_state"}
+		if res, ok := s.manifestResource(resource); ok && res.Mode == "export" {
+			cols = []string{"export_state"}
+		}
+		if cols[0] == "export_state" {
+			if previous, exists := prev[resource]; exists {
+				previousState, valid := checkpoint.ParseKeyset(previous)
+				if !valid || previousState.Mode == checkpoint.ModeIncremental || !slices.Equal(previousState.Cols, cols) || len(previousState.Shards) != 1 {
+					return nil, fmt.Errorf("export %s: incompatible checkpoint", resource)
+				}
+			}
+		}
 		types := make([]string, len(cols))
 		for i := range types {
 			types[i] = "string"
@@ -437,7 +539,7 @@ func listableResources(resources []manifest.Resource) []manifest.Resource {
 	return out
 }
 
-func (s *Source) extract(ctx context.Context, sink arrowbatch.Inlet, opts filament.ExtractOpts, resumeStates map[string]pagination.State, resumeWatermarks map[string]map[string]string) error {
+func (s *Source) extract(ctx context.Context, sink arrowbatch.Inlet, opts filament.ExtractOpts, resumeStates map[string]pagination.State, resumeWatermarks map[string]map[string]string, resumeExports map[string]string) error {
 	if s.connector == nil || s.connector.manifest == nil {
 		return fmt.Errorf("httpapi source: extract before configure")
 	}
@@ -450,6 +552,7 @@ func (s *Source) extract(ctx context.Context, sink arrowbatch.Inlet, opts filame
 		Observe:              opts.Observe,
 		Resources:            s.connectorResources(opts.Resources),
 		EnabledResources:     enabledResources(opts.Selectors),
+		ResumeExports:        resumeExports,
 		ResumeStates:         resumeStates,
 		ResumeWatermarks:     resumeWatermarks,
 		IncrementalLookbacks: s.incrementalLookbacks,
@@ -822,7 +925,7 @@ func (s *Source) CursorColumns(_ context.Context, resource string) ([]filament.C
 	if !ok {
 		return nil, fmt.Errorf("httpapi source: unknown resource %q", resource)
 	}
-	if res.Incremental == nil {
+	if res.Incremental == nil || res.Incremental.ResponseCursor != "" {
 		return nil, nil
 	}
 	field, ok := manifest.IncrementalCursorField(res)
@@ -844,10 +947,8 @@ func (s *Source) CursorColumns(_ context.Context, resource string) ([]filament.C
 	}}, nil
 }
 
-// PlanIncremental creates a watermark-only checkpoint. Pagination cursors are
-// deliberately excluded: they are valid for resuming a failed page walk, but
-// carrying one into the next scheduled run alongside a newer watermark can
-// skip records.
+// PlanIncremental creates either a row watermark or an opaque export-token
+// checkpoint. Ordinary pagination state is never carried between scheduled runs.
 func (s *Source) PlanIncremental(_ context.Context, resources []string, prev map[string]filament.Checkpoint, cursors map[string]filament.ResourceCursorConfig) (map[string]filament.Checkpoint, error) {
 	if s.connector == nil || s.connector.manifest == nil {
 		return nil, fmt.Errorf("httpapi source: plan incremental before configure")
@@ -867,6 +968,14 @@ func (s *Source) PlanIncremental(_ context.Context, resources []string, prev map
 		}
 		if res.Incremental == nil {
 			return nil, fmt.Errorf("httpapi source: resource %q has no incremental watermark in its manifest", resource)
+		}
+		if res.Incremental.ResponseCursor != "" {
+			cp, err := s.planResponseCursor(resource, res, prev[resource], cursors[resource])
+			if err != nil {
+				return nil, err
+			}
+			plan[resource] = cp
+			continue
 		}
 		field, ok := manifest.IncrementalCursorField(res)
 		if !ok {
@@ -894,6 +1003,15 @@ func (s *Source) PlanIncremental(_ context.Context, resources []string, prev map
 		}
 		s.incrementalResources[resource] = spec
 		lookbacks[resource] = spec.OverlapSeconds
+
+		if res.Mode == "export" {
+			cp, err := s.planExportIncremental(res, prev[resource])
+			if err != nil {
+				return nil, err
+			}
+			plan[resource] = cp
+			continue
+		}
 
 		checkpointKey := spec.DurableCheckpointKey()
 		cols := []string{checkpointKey}
@@ -927,7 +1045,7 @@ func incrementalCursorWarning(resource manifest.Resource) string {
 	if resource.Incremental.Comparator == "lex" || resource.Incremental.Comparator == "" {
 		warnings = append(warnings, "Lexical cursors must have a representation whose byte ordering matches source ordering")
 	}
-	if resource.Parent != nil {
+	if resource.Parent != nil && resource.Mode != "export" {
 		warnings = append(warnings, "Fan-out resources use one aggregate watermark; configure a lookback large enough to cover late arrivals during extraction")
 	}
 	return strings.Join(warnings, "; ")
@@ -948,12 +1066,18 @@ func newIncrementalRecordReducer(source *Source, seeds map[string]map[string]str
 }
 
 func (r *incrementalRecordReducer) record(rec record) (record, error) {
+	if r.source.connector != nil && r.source.connector.manifest != nil {
+		if res, ok := r.source.manifestResource(r.source.baseResourceName(rec.Resource)); ok && res.Mode == "export" {
+			return rec, nil
+		}
+	}
+
 	spec, ok := r.source.incrementalResources[rec.Resource]
 	if !ok {
 		base := r.source.baseResourceName(rec.Resource)
 		spec, ok = r.source.incrementalResources[base]
 	}
-	if !ok {
+	if !ok || spec.ResponseCursor != "" {
 		return rec, nil
 	}
 	checkpointKey := spec.DurableCheckpointKey()
@@ -1012,4 +1136,68 @@ func (s *incrementalRecordSink) PushBatch(records []record) error {
 		}
 	}
 	return nil
+}
+
+// ManagedIncremental reports resources whose continuation is not a row value.
+func (s *Source) ManagedIncremental(resource string) bool {
+	if s.connector == nil || s.connector.manifest == nil {
+		return false
+	}
+	res, ok := s.manifestResource(s.baseResourceName(resource))
+	return ok && res.Incremental != nil && res.Incremental.ResponseCursor != ""
+}
+
+type responseCheckpointSink interface {
+	Checkpoint(resource, token string) error
+}
+
+func (r *rowSink) Checkpoint(resource, token string) error {
+	rw, err := r.writer(resource)
+	if err != nil {
+		return err
+	}
+	return rw.w.Drain(rowmodel.Meta{Key: []string{token}})
+}
+
+func (s *incrementalRecordSink) Checkpoint(resource, token string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	target, ok := s.sink.(responseCheckpointSink)
+	if !ok {
+		return fmt.Errorf("response cursor requires a checkpoint-capable sink")
+	}
+	return target.Checkpoint(resource, token)
+}
+
+// Bind opaque state to the manifest and non-secret connection identity. Token
+// credentials may rotate without invalidating a tenant's export continuation.
+func (s *Source) responseCursorIdentity(res manifest.Resource) string {
+	config := map[string]string{}
+	for key, value := range s.connector.creds {
+		if s.connector.manifest.Config[key].Type != "secret" {
+			config[key] = value
+		}
+	}
+	data, _ := json.Marshal(struct {
+		Resource manifest.Resource
+		BaseURL  string
+		Config   map[string]string
+	}{res, s.connector.manifest.Connection.BaseURL, config})
+	return fmt.Sprintf("%x", sha256.Sum256(data))
+}
+
+func (s *Source) planResponseCursor(resource string, res manifest.Resource, previous filament.Checkpoint, config filament.ResourceCursorConfig) (filament.Checkpoint, error) {
+	if config.Field != "" || config.LookbackSeconds != 0 {
+		return nil, fmt.Errorf("incremental %q uses source-managed state", resource)
+	}
+	spec := *res.Incremental
+	s.incrementalResources[resource] = spec
+	cols := []string{spec.DurableCheckpointKey()}
+	// Bind saved tokens to the exact request and continuation contract.
+	identity := s.responseCursorIdentity(res)
+	cp := checkpoint.KeysetCheckpoint{Mode: checkpoint.ModeIncremental, Cols: cols, Types: []string{"string"}, Meta: map[string]string{"response_cursor": identity}, Shards: []checkpoint.KeysetShard{{Key: watermarkKey(spec.Initial)}}}
+	if old, ok := checkpoint.ParseKeyset(previous); ok && old.Mode == checkpoint.ModeIncremental && slices.Equal(old.Cols, cols) && len(old.Shards) == 1 && old.Meta["response_cursor"] == identity {
+		cp.Shards = old.Shards
+	}
+	return cp.ToCheckpoint(resource), nil
 }

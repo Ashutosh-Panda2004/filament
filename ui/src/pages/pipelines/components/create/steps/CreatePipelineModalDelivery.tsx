@@ -1,109 +1,38 @@
-import { Fragment } from "react";
+import type { FC } from "react";
 
-import Accordion, { AccordionSize } from "@galaxy-io/dls/accordion/Accordion";
-import FlexWrapper, { FlexDirection, FlexGap } from "@galaxy-io/dls/containers/FlexWrapper";
-import HorizontalDivider from "@galaxy-io/dls/dividers/HorizontalDivider";
-import Text, { TextWeight } from "@galaxy-io/dls/text/Text";
-import Widget from "@galaxy-io/dls/widget/Widget";
+import Flex, { AlignItems, FlexDirection } from "@galaxy-io/dls/layout/Flex";
 
-import { CreatePipelineModalActionType } from "@/pages/pipelines/components/create/actions";
-import {
-  useCreatePipelineModalDispatch,
-  useCreatePipelineModalState,
-} from "@/pages/pipelines/components/create/CreatePipelineModalProvider";
-import CreatePipelineModalDeliverySink from "@/pages/pipelines/components/create/steps/components/CreatePipelineModalDeliverySink";
-import PipelineScheduleFields from "@/pages/pipelines/components/schedule/PipelineScheduleFields";
-import PipelineWorkerConfigurationEditor from "@/pages/pipelines/components/worker/PipelineWorkerConfigurationEditor";
+import { ConnectorKind, ExecutionMode } from "@/gen/ingestion/v1/common_pb";
 
-interface CreatePipelineModalDeliverySectionProps {
-  header: string;
-  children: React.ReactNode;
-}
+import { useCreatePipelineModalState } from "@/pages/pipelines/components/create/CreatePipelineModalProvider";
+import CreatePipelineModalDeliveryConnection from "@/pages/pipelines/components/create/steps/components/CreatePipelineModalDeliveryConnection";
+import CreatePipelineModalDeliveryNotifications from "@/pages/pipelines/components/create/steps/components/CreatePipelineModalDeliveryNotifications";
+import CreatePipelineModalDeliverySchedule from "@/pages/pipelines/components/create/steps/components/CreatePipelineModalDeliverySchedule";
+import CreatePipelineModalDeliveryWorker from "@/pages/pipelines/components/create/steps/components/CreatePipelineModalDeliveryWorker";
 
-const CreatePipelineModalDeliverySection = ({
-  header,
-  children,
-}: CreatePipelineModalDeliverySectionProps) => (
-  <FlexWrapper direction={FlexDirection.COLUMN} gap={FlexGap.MEDIUM} fillWidth>
-    <FlexWrapper direction={FlexDirection.COLUMN} gap={2} fillWidth>
-      <Text weight={TextWeight.MEDIUM}>{header}</Text>
-    </FlexWrapper>
-    {children}
-  </FlexWrapper>
-);
-
-const CreatePipelineModalDeliverySchedule = () => {
-  const { schedule } = useCreatePipelineModalState();
-  const dispatch = useCreatePipelineModalDispatch();
+const CreatePipelineModalDelivery: FC = () => {
+  const { sourceConnection, sinks, executionMode } = useCreatePipelineModalState();
 
   return (
-    <PipelineScheduleFields
-      state={schedule}
-      onChange={(partial) =>
-        dispatch({
-          type: CreatePipelineModalActionType.SET_SCHEDULE,
-          payload: partial,
-        })
-      }
-    />
-  );
-};
-
-const CreatePipelineModalDeliveryAdvanced = () => {
-  const { workerConfiguration, workerConfigurationError } = useCreatePipelineModalState();
-  const dispatch = useCreatePipelineModalDispatch();
-
-  return (
-    <Accordion header="Worker configuration" padding="16px" size={AccordionSize.LARGE}>
-      <PipelineWorkerConfigurationEditor
-        value={workerConfiguration}
-        error={workerConfigurationError}
-        onChange={(payload) =>
-          dispatch({
-            type: CreatePipelineModalActionType.SET_WORKER_CONFIGURATION,
-            payload,
-          })
-        }
-      />
-    </Accordion>
-  );
-};
-
-const CreatePipelineModalDelivery = () => {
-  const { sinks } = useCreatePipelineModalState();
-  const dispatch = useCreatePipelineModalDispatch();
-
-  return (
-    <FlexWrapper direction={FlexDirection.COLUMN} gap={FlexGap.LARGE} fillWidth>
-      {sinks.length > 0 && (
-        <CreatePipelineModalDeliverySection header="Destinations">
-          <Widget noPadding noHover fillWidth>
-            <FlexWrapper direction={FlexDirection.COLUMN} fillWidth>
-              {sinks.map((sink, index) => (
-                <Fragment key={sink.connection.id}>
-                  {index > 0 && <HorizontalDivider />}
-                  <CreatePipelineModalDeliverySink
-                    sink={sink}
-                    onChange={(sinkId, writeMode) =>
-                      dispatch({
-                        type: CreatePipelineModalActionType.SET_SINK_WRITE_MODE,
-                        payload: { sinkId, writeMode },
-                      })
-                    }
-                  />
-                </Fragment>
-              ))}
-            </FlexWrapper>
-          </Widget>
-        </CreatePipelineModalDeliverySection>
+    <Flex alignItems={AlignItems.STRETCH} direction={FlexDirection.COLUMN} gap={12} fillWidth>
+      {sourceConnection && (
+        <CreatePipelineModalDeliveryConnection
+          connection={sourceConnection}
+          kind={ConnectorKind.SOURCE}
+        />
       )}
-      <CreatePipelineModalDeliverySection header="Schedule">
-        <CreatePipelineModalDeliverySchedule />
-      </CreatePipelineModalDeliverySection>
-      <CreatePipelineModalDeliverySection header="Advanced">
-        <CreatePipelineModalDeliveryAdvanced />
-      </CreatePipelineModalDeliverySection>
-    </FlexWrapper>
+      {sinks.map((sink) => (
+        <CreatePipelineModalDeliveryConnection
+          key={sink.connection.id}
+          connection={sink.connection}
+          kind={ConnectorKind.SINK}
+          sink={sink}
+        />
+      ))}
+      {executionMode !== ExecutionMode.CONTINUOUS && <CreatePipelineModalDeliverySchedule />}
+      <CreatePipelineModalDeliveryNotifications />
+      <CreatePipelineModalDeliveryWorker />
+    </Flex>
   );
 };
 

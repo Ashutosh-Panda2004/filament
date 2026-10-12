@@ -3,6 +3,7 @@ package pipeline
 import (
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/galaxy-io/filament/checkpoint"
 	"github.com/galaxy-io/filament/events"
 	"github.com/galaxy-io/filament/rowmodel"
+	"github.com/galaxy-io/filament/transform"
 )
 
 // ErrPipelineClosed is returned to a builder when it flushes after the pipeline
@@ -27,9 +29,16 @@ type partKey struct {
 	part     int
 }
 
+type schemaPreparation struct {
+	once sync.Once
+	err  error
+}
+
 type registeredSchema struct {
-	model rowmodel.Schema
-	arrow *arrow.Schema
+	model       rowmodel.Schema
+	preparation *schemaPreparation
+	arrow       *arrow.Schema
+	plan        *transform.Plan // nil → the resource bypasses the transformer pool
 }
 
 var _ arrowbatch.Inlet = (*inlet)(nil)
@@ -41,35 +50,51 @@ func (in *inlet) Builder(resource string, part int, supplied rowmodel.Schema) (a
 	key := partKey{resource: resource, part: part}
 	p.registryMu.Lock()
 	defer p.registryMu.Unlock()
+	if err := rowmodel.ValidateReservedFields(supplied); err != nil {
+		return nil, fmt.Errorf("pipeline: %w", err)
+	}
 	schema := supplied.Clone()
 	if schema.Resource == "" {
 		schema.Resource = resource
 	} else if schema.Resource != resource {
 		return nil, fmt.Errorf("pipeline: schema resource %q does not match builder resource %q", schema.Resource, resource)
 	}
+	// The plan compiles against the source layout before CDC and audit
+	// shaping, the same schema validation and ensureSchema compile against.
+	layout := schema
+	if p.audit != nil && p.audit.CDCAppend {
+		schema = rowmodel.AsCDCAppendHistory(schema)
+	}
 	if p.audit != nil {
 		var err error
-		if p.audit.CDCAppend {
-			schema = rowmodel.AsCDCAppendHistory(schema)
-		}
 		schema, err = rowmodel.WithAuditFields(schema, p.audit.CDC)
 		if err != nil {
 			return nil, fmt.Errorf("pipeline: %w", err)
 		}
 	}
 	want := arrowbatch.Schema(schema)
-	if registered, ok := p.schemas[resource]; ok {
+	registered, ok := p.schemas[resource]
+	if ok {
 		if !registered.model.Equal(schema) {
 			return nil, fmt.Errorf("pipeline: schema changed for resource %q", resource)
 		}
 		want = registered.arrow
 	} else {
-		p.schemas[resource] = registeredSchema{model: schema, arrow: want}
+		plan, err := p.planFor(resource, layout)
+		if err != nil {
+			return nil, err
+		}
+		registered = registeredSchema{model: schema, arrow: want, preparation: &schemaPreparation{}, plan: plan}
+		p.schemas[resource] = registered
 	}
 	if _, exists := p.builders[key]; exists {
 		return nil, fmt.Errorf("pipeline: builder already open for %q part %d", resource, part)
 	}
-	b := arrowbatch.NewBuilder(want, p.alloc, p.opts, &slot{p: p, resource: resource, part: part})
+	out := p.batchCh
+	if registered.plan != nil {
+		out = p.transformCh
+	}
+	b := arrowbatch.NewBuilder(want, p.alloc, p.opts, &slot{p: p, out: out, resource: resource, part: part})
 	p.builders[key] = b
 	if p.audit == nil {
 		return b, nil
@@ -101,9 +126,12 @@ func (w *auditWriter) EndRow(meta rowmodel.Meta) error {
 }
 
 // slot receives one builder's chunks: it sequences them per (resource, part),
-// derives the checkpoint delta from the last row's meta, and queues the batch.
+// derives the checkpoint delta from the last row's meta, and queues the batch on
+// out, the transform or writer channel chosen when the builder opened. Markers
+// take the same channel as rows so a part's completion never overtakes its data.
 type slot struct {
 	p        *Pipeline
+	out      chan queuedBatch
 	resource string
 	part     int
 	seq      uint64
@@ -119,7 +147,9 @@ func (s *slot) Chunk(b *arrowbatch.Batch) error {
 	b.Resource = s.resource
 	b.Part = s.part
 	b.Seq = seq
-	b.Cursor = cursorOf(s.resource, s.part, b.Last, int(rows))
+	if s.p.stream == nil {
+		b.Cursor = cursorOf(s.resource, s.part, b.Last, int(rows))
+	}
 	if err := s.send(b); err != nil {
 		return err
 	}
@@ -128,15 +158,19 @@ func (s *slot) Chunk(b *arrowbatch.Batch) error {
 	return nil
 }
 
-// Drained queues the part's completion marker (no rows): a change stream's final
+// Drained queues the part's completion marker (no rows): an opaque incremental
+// key (promoted only at run commit), a change stream's final
 // position, persisted even when the run wrote nothing so the next run resumes from
 // here, or a coarse (bitmap/ctid) part's total row count, which the tracker matches
 // against acked rows before flagging the part complete.
 func (s *slot) Drained(meta filament.RowMeta, total int) error {
 	var cursor *filament.CheckpointData
-	if meta.LSN != "" {
+	switch {
+	case meta.LSN != "":
 		cursor = checkpoint.NewStreamDelta(s.resource, meta.LSN, meta.Seq)
-	} else {
+	case len(meta.Key) > 0:
+		cursor = checkpoint.NewShardDelta(s.resource, s.part, meta.Key)
+	default:
 		cursor = checkpoint.NewCoarseDone(s.resource, s.part, total)
 	}
 	b := arrowbatch.NewMarker()
@@ -152,11 +186,21 @@ func (s *slot) Drained(meta filament.RowMeta, total int) error {
 // (or ErrPipelineClosed) once the writer has given up, so a Source stops
 // extracting instead of spinning against a dead pipeline.
 func (s *slot) send(b *arrowbatch.Batch) error {
+	var epoch *filament.EpochRef
+	if s.p.stream != nil && s.p.stream.epoch != nil {
+		ref := *s.p.stream.epoch
+		epoch = &ref
+	}
+	return s.p.send(s.out, queuedBatch{batch: b, epoch: epoch})
+}
+
+// send queues item on ch, blocking on backpressure, until the pipeline gives up.
+func (p *Pipeline) send(ch chan queuedBatch, item queuedBatch) error {
 	select {
-	case s.p.batchCh <- b:
+	case ch <- item:
 		return nil
-	case <-s.p.done:
-		if err := s.p.Err(); err != nil {
+	case <-p.done:
+		if err := p.Err(); err != nil {
 			return err
 		}
 		return ErrPipelineClosed

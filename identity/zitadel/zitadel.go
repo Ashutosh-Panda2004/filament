@@ -4,6 +4,10 @@
 // accounts use. The server is Zitadel's only client: browsers hold a session
 // cookie and never learn the issuer.
 //
+// A bootstrap tenant is converged on boot with a person who administers it
+// with a password the deployer chose, which closes sign-up: registration is
+// refused and everyone else is invited.
+//
 // It is a separate module so its gRPC and SDK dependencies stay out of the
 // core module every connector builds against.
 package zitadel
@@ -18,6 +22,7 @@ import (
 	"sync"
 
 	"connectrpc.com/connect"
+	oidcclient "github.com/zitadel/oidc/v3/pkg/client"
 	"github.com/zitadel/zitadel-go/v3/pkg/authorization"
 	zitadeloauth "github.com/zitadel/zitadel-go/v3/pkg/authorization/oauth"
 	zclient "github.com/zitadel/zitadel-go/v3/pkg/client"
@@ -43,19 +48,41 @@ type Options struct {
 	// UIOrigin is the origin the UI is served from; https marks the session
 	// cookie Secure.
 	UIOrigin string
+	// Bootstrap, when set, is a tenant converged on every boot with the
+	// person who administers it.
+	Bootstrap Bootstrap
+}
+
+// Bootstrap names a tenant and the person who administers it, with the
+// password the deployer chose. All fields or none.
+type Bootstrap struct {
+	Tenant        string
+	AdminEmail    string
+	AdminPassword string
+}
+
+func (b Bootstrap) set() bool { return b.Tenant != "" || b.AdminEmail != "" || b.AdminPassword != "" }
+
+func (b Bootstrap) complete() bool {
+	return b.Tenant != "" && b.AdminEmail != "" && b.AdminPassword != ""
 }
 
 // Provider implements filament's identity port against Zitadel.
 type Provider struct {
-	issuer   string
-	api      *zclient.Client
-	verifier authorization.Verifier[*zitadeloauth.IntrospectionContext]
-	project  projectRef
+	issuer string
+	// tokenEndpoint is discovered once; GetToken runs every grant against it.
+	tokenEndpoint string
+	api           *zclient.Client
+	verifier      authorization.Verifier[*zitadeloauth.IntrospectionContext]
+	project       projectRef
 	// rolesClaim is precomputed; every token-authenticated request reads it.
 	rolesClaim string
 	// secureCookies marks the session cookie Secure when the UI is served
 	// over https.
 	secureCookies bool
+	// inviteOnly refuses registration: an admin was bootstrapped and people
+	// join by invitation.
+	inviteOnly bool
 	// callers caches sessionRef -> cachedCaller so a browser's requests do
 	// not each round-trip to Zitadel.
 	callers sync.Map
@@ -73,6 +100,9 @@ func New(ctx context.Context, opts Options) (*Provider, error) {
 	if opts.PAT == "" {
 		return nil, errors.New("zitadel: personal access token is required")
 	}
+	if opts.Bootstrap.set() && !opts.Bootstrap.complete() {
+		return nil, errors.New("zitadel: bootstrap needs a tenant, an admin email, and an admin password")
+	}
 	issuer := strings.TrimRight(opts.Issuer, "/")
 	target, err := dialTarget(issuer)
 	if err != nil {
@@ -83,10 +113,27 @@ func New(ctx context.Context, opts Options) (*Provider, error) {
 		return nil, fmt.Errorf("zitadel: connect %s: %w", issuer, err)
 	}
 
-	p := &Provider{issuer: issuer, api: api, secureCookies: strings.HasPrefix(opts.UIOrigin, "https://")}
+	discovered, err := oidcclient.Discover(ctx, issuer, http.DefaultClient)
+	if err != nil {
+		_ = api.Close()
+		return nil, fmt.Errorf("zitadel: discover %s: %w", issuer, err)
+	}
+	p := &Provider{
+		issuer:        issuer,
+		tokenEndpoint: discovered.TokenEndpoint,
+		api:           api,
+		secureCookies: strings.HasPrefix(opts.UIOrigin, "https://"),
+		inviteOnly:    opts.Bootstrap.AdminEmail != "",
+	}
 	if err := p.bootstrap(ctx); err != nil {
 		_ = api.Close()
 		return nil, fmt.Errorf("zitadel bootstrap: %w", err)
+	}
+	if opts.Bootstrap.set() {
+		if err := p.bootstrapTenant(ctx, opts.Bootstrap); err != nil {
+			_ = api.Close()
+			return nil, fmt.Errorf("zitadel bootstrap tenant %q: %w", opts.Bootstrap.Tenant, err)
+		}
 	}
 	verifier, err := zitadeloauth.WithJWT(p.project.id, http.DefaultClient)(ctx, target)
 	if err != nil {
@@ -169,14 +216,21 @@ func (p *Provider) authenticateToken(ctx context.Context, bearer string) (identi
 // what to request from the issuer.
 func (p *Provider) GetAuthConfig(_ context.Context, _ *connect.Request[authv1.GetAuthConfigRequest]) (*connect.Response[authv1.GetAuthConfigResponse], error) {
 	return connect.NewResponse(&authv1.GetAuthConfigResponse{
-		Issuer: p.issuer,
-		ServiceAccountScopes: []string{
-			"openid",
-			"urn:zitadel:iam:user:resourceowner",
-			"urn:zitadel:iam:org:project:id:" + p.project.id + ":aud",
-			"urn:zitadel:iam:org:projects:roles",
-		},
+		Issuer:               p.issuer,
+		ServiceAccountScopes: p.serviceAccountScopes(),
+		InviteOnly:           p.inviteOnly,
 	}), nil
+}
+
+// serviceAccountScopes put the organization, filament's audience, and the
+// caller's roles on a client-credentials token.
+func (p *Provider) serviceAccountScopes() []string {
+	return []string{
+		"openid",
+		"urn:zitadel:iam:user:resourceowner",
+		"urn:zitadel:iam:org:project:id:" + p.project.id + ":aud",
+		"urn:zitadel:iam:org:projects:roles",
+	}
 }
 
 // adminCaller resolves the caller the interceptor stashed and requires

@@ -1,6 +1,6 @@
 import { create } from "@bufbuild/protobuf";
 
-import { ReadMode, WriteMode } from "@/gen/ingestion/v1/common_pb";
+import { ExecutionMode, ReadMode, WriteMode } from "@/gen/ingestion/v1/common_pb";
 import {
   type CreatePipelineVersionRequest,
   CreatePipelineVersionRequestSchema,
@@ -18,12 +18,12 @@ import {
   PIPELINE_CANVAS_NODE_TYPE_TO_CONNECTOR_KIND_MAP,
 } from "@/pages/pipelines/canvas/constants";
 import { getNextNodePosition } from "@/pages/pipelines/canvas/graph/layout";
-import {
-  type CanvasEdge,
-  type CanvasNode,
-  isConnectionNode,
-  type PipelineCanvasEdgeData,
+import type {
+  CanvasEdge,
+  CanvasNode,
+  PipelineCanvasEdgeData,
 } from "@/pages/pipelines/canvas/types";
+import { isConnectionNode } from "@/pages/pipelines/canvas/utils";
 
 export const getCanvasEdgeResource = (
   edge: Pick<CanvasEdge, "sourceHandle">,
@@ -36,9 +36,15 @@ export const getCanvasEdgeConfig = (
   edge: Pick<CanvasEdge, "data">,
   baseEdge: PipelineEdgeProto | undefined,
 ): PipelineCanvasEdgeData => ({
+  destinationResource: (
+    edge.data?.destinationResource ??
+    baseEdge?.destinationResource ??
+    ""
+  ).trim(),
   readMode: edge.data?.readMode ?? baseEdge?.readMode ?? ReadMode.UNSPECIFIED,
   writeMode: edge.data?.writeMode ?? baseEdge?.writeMode ?? WriteMode.UNSPECIFIED,
   cursors: edge.data?.cursors ?? baseEdge?.cursors ?? [],
+  transform: edge.data && "transform" in edge.data ? edge.data.transform : baseEdge?.transform,
 });
 
 export const getProtoEdgeKey = (edge: PipelineEdgeProto) =>
@@ -91,6 +97,7 @@ export const mapCanvasStateToVersionRequest = (
   state: { nodes: CanvasNode[]; edges: CanvasEdge[] },
   pipelineId: Pipeline["id"],
   baseVersion: PipelineVersion | undefined,
+  executionMode: ExecutionMode = ExecutionMode.BOUNDED,
 ): CreatePipelineVersionRequest => {
   const baseNodesById = new Map((baseVersion?.graph?.nodes ?? []).map((node) => [node.id, node]));
   const baseEdgesByKey = new Map(
@@ -116,6 +123,9 @@ export const mapCanvasStateToVersionRequest = (
       toNode: edge.target,
       selector: baseEdge?.selector ?? "",
       ...getCanvasEdgeConfig(edge, baseEdge),
+      ...(executionMode === ExecutionMode.CONTINUOUS
+        ? { readMode: ReadMode.UNSPECIFIED, cursors: [], transform: undefined }
+        : {}),
     };
   });
 

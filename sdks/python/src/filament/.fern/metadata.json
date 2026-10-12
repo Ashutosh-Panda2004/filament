@@ -1,0 +1,17 @@
+{
+  "cliVersion": "5.139.2",
+  "generatorName": "fernapi/fern-python-sdk",
+  "generatorVersion": "5.33.0",
+  "generatorConfig": {
+    "package_name": "filament",
+    "client": {
+      "class_name": "Filament"
+    },
+    "inline_request_params": true,
+    "optional_auth": true,
+    "default_max_retries": 0
+  },
+  "originGitCommit": "090936f91c621353b6bed57461ace17616786294",
+  "originGitCommitIsDirty": false,
+  "invokedBy": "manual"
+}

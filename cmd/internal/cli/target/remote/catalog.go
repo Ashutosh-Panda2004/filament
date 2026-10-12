@@ -35,6 +35,8 @@ func (t *Target) Catalog(ctx context.Context) (model.Catalog, error) {
 				DisplayName: spec.GetDisplayName(),
 				Description: spec.GetDescription(),
 				Version:     spec.GetVersion(),
+				APIVersion:  spec.GetApiVersion(),
+				AliasTarget: spec.GetAliasTarget(),
 				Maturity:    maturityFromProto(spec.GetMaturity()),
 				Modes:       readModesFromProto(spec.GetModes()),
 				Config:      filament.ConfigSchema{Fields: fieldsFromProto(spec.GetConfigSchema().GetFields())},

@@ -17,6 +17,13 @@ type Source interface {
 	Teardown(ctx context.Context) error
 }
 
+// DestinationResourceNamer optionally supplies a default output name without
+// schema discovery. Implementations must be deterministic and perform no I/O.
+// An empty result leaves the resource name unchanged. Pipeline labels override it.
+type DestinationResourceNamer interface {
+	DestinationResource(resource string) string
+}
+
 // Resumable is the optional source contract for checkpointed extraction. prev maps
 // each resource to the cursor to resume from (a plan produced by ResumePlanner,
 // carrying any progress from a prior run); a resource absent from prev — or mapped
@@ -63,6 +70,14 @@ type IncrementalPlanner interface {
 	PlanIncremental(ctx context.Context, resources []string, prev map[string]Checkpoint, cursors map[string]ResourceCursorConfig) (map[string]Checkpoint, error)
 }
 
+// IncrementalResumePlanner restores source job state from the current run without
+// promoting it to a cross-run watermark. Opt-in plans carry replay_on_resume
+// metadata; their rows must be replayed after interruption, even for completed
+// jobs, because the previous sink transaction may not have committed.
+type IncrementalResumePlanner interface {
+	PlanIncrementalResume(ctx context.Context, planned, attempt map[string]Checkpoint) (map[string]Checkpoint, error)
+}
+
 // CursorColumnProvider describes which resource columns can safely serve as
 // durable incremental cursors and which one the connector recommends.
 type CursorColumnProvider interface {
@@ -82,11 +97,22 @@ type CursorColumn struct {
 	Warning          string
 }
 
+// ManagedIncrementalSource uses source-owned state rather than a row column.
+type ManagedIncrementalSource interface {
+	ManagedIncremental(resource string) bool
+}
+
 // ResolveCursorVersionPolicy binds a resource's configured or recommended
 // incremental cursor into the generic version contract used by sinks. A zero
 // policy means the source does not expose cursor metadata and callers should
 // retain their insertion-order fallback.
 func ResolveCursorVersionPolicy(ctx context.Context, src Source, resource string, config ResourceCursorConfig) (VersionPolicy, error) {
+	if managed, ok := src.(ManagedIncrementalSource); ok && managed.ManagedIncremental(resource) {
+		if config.Field != "" || config.LookbackSeconds != 0 {
+			return VersionPolicy{}, fmt.Errorf("incremental %q uses source-managed state", resource)
+		}
+		return VersionPolicy{}, nil
+	}
 	provider, ok := src.(CursorColumnProvider)
 	if !ok {
 		return VersionPolicy{}, nil
@@ -175,22 +201,33 @@ const (
 	ReplicationCDC      ReplicationMode = "cdc"
 )
 
-// ReplicationAware lets a source report which replication mode a connection
-// config selects. Sources without the contract are always standard.
-type ReplicationAware interface {
-	Replication(cfg Config) ReplicationMode
-}
+// SnapshotMode is whether a CDC resource without a checkpoint is read in full
+// before its change stream starts.
+type SnapshotMode string
+
+// The snapshot modes.
+const (
+	SnapshotInitial SnapshotMode = "initial"
+	SnapshotNone    SnapshotMode = "none"
+)
 
 // ReplicationStreamPlanningRequest is the connector-owned input for planning
 // an independently advancing source consumer.
 type ReplicationStreamPlanningRequest struct {
+	// SourceConnectionID is the stable Filament connection identity, independent of runs.
+	SourceConnectionID  string
 	ReplicationStreamID string
 	Config              Config
+	// Resources fixes continuous membership. Empty asks the connector for its default.
+	Resources []string
 }
 
 // ReplicationStreamPlan describes the connector-specific external consumer and
 // the normalized config fields that determine whether its continuity is reusable.
 type ReplicationStreamPlan struct {
+	// Resources is the connector-resolved fixed membership for continuous admission.
+	// Bounded CDC planning may leave it empty.
+	Resources        []string
 	ConsumerName     string
 	ConsumerConfig   map[string]any
 	ContinuityConfig map[string]any
@@ -211,10 +248,17 @@ type ReplicationStreamCleaner interface {
 	CleanupReplicationStream(ctx context.Context, stream ReplicationStream) error
 }
 
-// ReplicationOf resolves a connection's replication mode from its source.
-func ReplicationOf(src Source, cfg Config) ReplicationMode {
-	if aware, ok := src.(ReplicationAware); ok {
-		return aware.Replication(cfg)
+// ReplicationFor resolves a connection's replication mode from the source's
+// declared policies and the connection config. CDC requires both: a CDC source
+// policy on the spec and replication=cdc in the config.
+func ReplicationFor(spec ConnectorSpec, cfg Config) ReplicationMode {
+	if cfg.String("replication") != string(ReplicationCDC) {
+		return ReplicationStandard
+	}
+	for _, policy := range spec.SourcePolicies {
+		if policy.Mode == ModeCDC {
+			return ReplicationCDC
+		}
 	}
 	return ReplicationStandard
 }
@@ -235,12 +279,17 @@ type ConfigValidatable interface {
 // ConnectorSpec is a source's self-description: identity, supported modes and
 // policies, config schema, and resource capabilities. It powers the catalog.
 type ConnectorSpec struct {
+	// AliasTarget is the concrete registration selected by a catalog alias.
+	// The registry sets it; concrete catalog entries leave it empty.
+	AliasTarget    string
+	Stream         *StreamCapabilities
 	Name           string
 	DisplayName    string
 	Description    string
 	DarkLogoURL    string
 	LightLogoURL   string
 	Version        string
+	APIVersion     string
 	Maturity       ConnectorMaturity
 	Modes          []ReadMode
 	SourcePolicies []SourcePolicy
@@ -386,7 +435,21 @@ const (
 	SourceProgressWatermarkAdvanced
 	SourceProgressRateLimited
 	SourceProgressRetryExhausted
+	SourceProgressExportJobCreated
+	SourceProgressExportJobPolled
+	SourceProgressExportJobReady
 )
+
+// ExportJobProgress describes one job execution within an extraction attempt.
+// CorrelationID is opaque and changes on resume; it is never an upstream job ID,
+// parent key, or URL. Polls and Elapsed are local to this execution, including
+// when Resumed is true. Ready means an artifact is available, not sink commit.
+type ExportJobProgress struct {
+	CorrelationID string        `json:"correlationId"`
+	Polls         int           `json:"polls"`
+	Elapsed       time.Duration `json:"elapsed"`
+	Resumed       bool          `json:"resumed"`
+}
 
 // SourceProgress carries source-local extraction progress to the runner. Fields
 // are populated according to Kind. Checkpoint on WatermarkAdvanced describes an
@@ -401,6 +464,7 @@ type SourceProgress struct {
 	RetryAfter   time.Duration
 	Checkpoint   *CheckpointData
 	Error        string
+	ExportJob    ExportJobProgress
 }
 
 // SourceObserver receives progress concurrently when a source extracts more

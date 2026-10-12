@@ -3,8 +3,11 @@ package s3
 import (
 	"fmt"
 	"strings"
+	"text/template"
 
 	"github.com/galaxy-io/filament"
+	"github.com/galaxy-io/filament/connectors/internal/encoder"
+	object "github.com/galaxy-io/filament/connectors/object/internal"
 )
 
 const (
@@ -20,6 +23,7 @@ const (
 type sinkConfig struct {
 	bucket          string
 	prefix          string
+	partition       *template.Template
 	region          string
 	endpoint        string
 	authMethod      string
@@ -29,62 +33,46 @@ type sinkConfig struct {
 	pathStyle       bool
 	partSize        int64
 	uploadWorkers   int
-}
-
-// Spec describes the sink's configuration and commit-durable write modes.
-func (s *Sink) Spec() filament.SinkSpec {
-	iamCredentials := &filament.FieldCondition{Field: "auth_method", Values: []string{authMethodIAMCredentials}}
-	return filament.SinkSpec{
-		Name:         "s3",
-		DisplayName:  "Amazon S3 (NDJSON)",
-		Description:  "Run-versioned NDJSON objects in Amazon S3 or an S3-compatible object store.",
-		DarkLogoURL:  "https://cdn.getgalaxy.io/sources/source-icon-s3-dark.svg",
-		LightLogoURL: "https://cdn.getgalaxy.io/sources/source-icon-s3-light.svg",
-		Version:      "2",
-		Config: filament.ConfigSchema{Fields: []filament.ConfigField{
-			{Name: "bucket", Type: filament.FieldString, Required: true, Scope: filament.ScopeConnection, Help: "Destination S3 bucket."},
-			{Name: "prefix", Type: filament.FieldString, Scope: filament.ScopePipeline, Help: "Key prefix; objects land at <prefix>/<run>/<resource>.ndjson. Empty defaults to the normalized source connection name."},
-			{Name: "region", Type: filament.FieldString, Scope: filament.ScopeConnection, Help: "AWS region; defaults to the SDK's resolved region."},
-			{Name: "endpoint", Type: filament.FieldString, Scope: filament.ScopeConnection, Help: "Custom S3 endpoint, such as MinIO; defaults to AWS."},
-			{Name: "path_style", Type: filament.FieldBool, Scope: filament.ScopeConnection, Help: "Use path-style bucket addressing. Defaults to true for custom endpoints."},
-			{Name: "auth_method", Type: filament.FieldEnum, Default: authMethodInstanceProfile, Scope: filament.ScopeConnection, Help: "How Filament authenticates to S3.", Enum: []filament.EnumOption{
-				{Value: authMethodInstanceProfile, Label: "Instance Profile"},
-				{Value: authMethodIAMCredentials, Label: "IAM Credentials"},
-			}},
-			{Name: "access_key_id", Type: filament.FieldSecret, Required: true, Scope: filament.ScopeConnection, VisibleWhen: iamCredentials, Help: "AWS access key ID."},
-			{Name: "secret_access_key", Type: filament.FieldSecret, Required: true, Scope: filament.ScopeConnection, VisibleWhen: iamCredentials, Help: "AWS secret access key."},
-			{Name: "session_token", Type: filament.FieldSecret, Scope: filament.ScopeConnection, VisibleWhen: iamCredentials, Help: "Optional AWS session token for temporary credentials."},
-			{Name: "part_size_mib", Type: filament.FieldInt, Default: defaultPartSizeMiB, Scope: filament.ScopePipeline, Help: "Multipart request size in MiB; 5 through 5120. Also sets the 10,000-part object-size ceiling; buffers allocate lazily."},
-			{Name: "upload_concurrency", Type: filament.FieldInt, Default: defaultUploadWorkers, Scope: filament.ScopePipeline, Help: "Concurrent S3 upload operations across resources; 1 through 32."},
-		}},
-		SchemaField: "prefix",
-		Capabilities: filament.SinkCapabilities{
-			EncodedIntegrity: true,
-			WritePolicies: commitDurableCapabilities(
-				filament.IngestionFullAppend,
-				filament.IngestionCDCAppend,
-				filament.IngestionFullReplace,
-			),
-		},
-	}
-}
-
-func commitDurableCapabilities(types ...filament.IngestionType) []filament.WritePolicyCapability {
-	capabilities := filament.WriteCapabilities(types...)
-	for i := range capabilities {
-		capabilities[i].Durability = filament.DurabilityAfterCommit
-		capabilities[i].Atomicity = filament.AtomicityResource
-	}
-	return capabilities
-}
-
-// Validate performs pure connector-specific validation and no network I/O.
-func (s *Sink) Validate(cfg filament.Config) error {
-	_, err := parseConfig(cfg)
-	return err
+	fileFormat      encoder.FileFormat
+	compression     encoder.Compression
 }
 
 func parseConfig(cfg filament.Config) (sinkConfig, error) {
+	formatName := cfg.String("file_format")
+	compressionName := cfg.String("compression")
+	if formatName == "" {
+		legacyName := cfg.String("encoding")
+		if legacyName == "" {
+			legacyName = cfg.String("file_type")
+		}
+		switch strings.ToLower(strings.TrimSpace(legacyName)) {
+		case "json_gzip", "gzip_json", "ndjson_gzip", "jsonl_gzip", "json.gz", "ndjson.gz":
+			formatName = string(encoder.FileFormatNDJSON)
+			if !cfg.Has("compression") {
+				compressionName = string(encoder.CompressionGZIP)
+			}
+		case "json", "jsonl":
+			// The temporary combined encoding option treated these as NDJSON.
+			// Preserve that behavior for stored legacy configurations.
+			formatName = string(encoder.FileFormatNDJSON)
+		default:
+			formatName = legacyName
+		}
+	}
+	fileFormat, err := encoder.ParseFileFormat(formatName)
+	if err != nil {
+		return sinkConfig{}, fmt.Errorf("s3 sink: file_format: %w", err)
+	}
+	if compressionName == "" {
+		compressionName = string(fileFormat.DefaultCompression())
+	}
+	compression, err := encoder.ParseCompression(compressionName)
+	if err != nil {
+		return sinkConfig{}, fmt.Errorf("s3 sink: compression: %w", err)
+	}
+	if err := (encoder.Options{FileFormat: fileFormat, Compression: compression}).Validate(); err != nil {
+		return sinkConfig{}, fmt.Errorf("s3 sink: %w", err)
+	}
 	out := sinkConfig{
 		bucket:          strings.TrimSpace(cfg.String("bucket")),
 		prefix:          strings.Trim(cfg.String("prefix"), "/"),
@@ -96,9 +84,18 @@ func parseConfig(cfg filament.Config) (sinkConfig, error) {
 		sessionToken:    cfg.Secret("session_token"),
 		partSize:        defaultPartSizeMiB << 20,
 		uploadWorkers:   defaultUploadWorkers,
+		fileFormat:      fileFormat,
+		compression:     compression,
 	}
 	if out.bucket == "" {
 		return sinkConfig{}, fmt.Errorf("s3 sink: bucket is required")
+	}
+	partitionText := object.DefaultPartition
+	if cfg.Has("partition") {
+		partitionText = strings.Trim(cfg.String("partition"), "/")
+	}
+	if out.partition, err = object.ParsePartition(partitionText); err != nil {
+		return sinkConfig{}, fmt.Errorf("s3 sink: partition: %w", err)
 	}
 	if out.authMethod == "" {
 		out.authMethod = authMethodInstanceProfile

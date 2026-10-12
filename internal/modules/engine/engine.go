@@ -8,7 +8,9 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/galaxy-io/filament"
 	"github.com/galaxy-io/filament/eventbus/host"
@@ -58,10 +60,9 @@ func (m *Module) Mount(_ context.Context, d module.Deps) error {
 	return nil
 }
 
-// onRunRequested loads the requested run and executes it. A failure to load is
-// transient (the request state may not be persisted yet) and is naked for
-// redelivery; a run that fails for any other reason is reported as a fact and
-// acked — blindly re-running a whole extraction would duplicate work.
+// onRunRequested loads the requested run and executes it. Missing runs are
+// stale events and are acknowledged; other load failures retry on redelivery.
+// Execution failures are reported as facts to avoid duplicating extraction.
 func (m *Module) onRunRequested(ctx context.Context, ev events.Event[events.RunRequestedEvent]) error {
 	if m.log != nil {
 		m.log.Trace("run request received",
@@ -70,8 +71,15 @@ func (m *Module) onRunRequested(ctx context.Context, ev events.Event[events.RunR
 			filament.Field{Key: "run_id", Value: string(ev.Run)})
 	}
 	state, err := m.ds.LoadRun(ctx, ev.Tenant, ev.Run)
+	// Runs are persisted before publication, but may be deleted before delivery.
+	if errors.Is(err, filament.ErrNotFound) {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("engine: load run %q: %w", ev.Run, err)
+	}
+	if state.Request.Options.Execution.Normalize() == filament.ExecutionContinuous {
+		return nil
 	}
 	if !runner.ShouldRun(state) {
 		if m.log != nil {
@@ -83,5 +91,7 @@ func (m *Module) onRunRequested(ctx context.Context, ev events.Event[events.RunR
 		}
 		return nil // already running or finished — ack and ignore
 	}
-	return runner.RunOne(ctx, m.deps, runner.SpecFromState(state))
+	spec := runner.SpecFromState(state)
+	spec.ExecutionID = ev.At.UTC().Format(time.RFC3339Nano)
+	return runner.RunOne(ctx, m.deps, spec)
 }

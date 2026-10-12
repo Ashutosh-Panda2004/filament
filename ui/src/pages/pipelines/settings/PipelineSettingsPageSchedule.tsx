@@ -1,37 +1,30 @@
-import { useState } from "react";
+import { type FC, useState } from "react";
 
 import { create } from "@bufbuild/protobuf";
-import { useParams } from "@tanstack/react-router";
 
-import Accordion from "@galaxy-io/dls/accordion/Accordion";
-import Button from "@galaxy-io/dls/buttons/Button";
-import FlexWrapper, {
-  AlignItems,
-  FlexDirection,
-  FlexGap,
-  JustifyContent,
-} from "@galaxy-io/dls/containers/FlexWrapper";
+import Button, { ButtonVariant } from "@galaxy-io/dls/buttons/Button";
+import Flex, { AlignItems, JustifyContent } from "@galaxy-io/dls/layout/Flex";
 import { ToastVariant } from "@galaxy-io/dls/toast/Toast";
 import { useToast } from "@galaxy-io/dls/toast/useToast";
 
+import { ExecutionMode } from "@/gen/ingestion/v1/common_pb";
 import {
   CreatePipelineScheduleRequestSchema,
-  GetPipelineRequestSchema,
   type PipelineScheduleConfig,
   UpdatePipelineScheduleRequestSchema,
 } from "@/gen/ingestion/v1/pipelines_pb";
 
+import { PIPELINE_SCHEDULE_DEFAULT_STATE } from "@/pages/pipelines/components/schedule/constants";
 import PipelineScheduleFields from "@/pages/pipelines/components/schedule/PipelineScheduleFields";
-import { PIPELINE_SCHEDULE_DEFAULT_STATE } from "@/pages/pipelines/settings/constants";
-import type { PipelineSettingsPageScheduleState } from "@/pages/pipelines/settings/types";
+import type { PipelineScheduleState } from "@/pages/pipelines/components/schedule/types";
 import {
   formatPipelineScheduleSummary,
   hasPipelineScheduleChanges,
-  mapPipelineScheduleCronToState,
-  mapPipelineScheduleStateToCron,
-} from "@/pages/pipelines/settings/utils";
+} from "@/pages/pipelines/components/schedule/utils";
 
-import { useSuspenseGetPipelineQuery } from "@/api/queries/pipelines";
+import { usePipelineParams } from "@/module/hooks";
+
+import { createGetPipelineInput, useSuspenseGetPipelineQuery } from "@/api/queries/pipelines";
 import {
   useCreatePipelineScheduleMutation,
   useUpdatePipelineScheduleMutation,
@@ -39,32 +32,38 @@ import {
 
 import { getErrorMessage } from "@/utils/errors";
 
-const PipelineSettingsPageSchedule = () => {
-  const { showToast } = useToast();
-  const { id: pipelineId } = useParams({ from: "/_app/pipelines/$id" });
+const PipelineSettingsPageSchedule: FC = () => {
+  const { toast } = useToast();
+  const { id: pipelineId } = usePipelineParams();
 
   const { data } = useSuspenseGetPipelineQuery({
-    input: create(GetPipelineRequestSchema, { id: pipelineId, includeSchedule: true }),
+    input: createGetPipelineInput(pipelineId),
   });
   const schedule = data.pipeline?.schedule;
 
   const { mutate: createSchedule, isPending: isCreating } = useCreatePipelineScheduleMutation();
   const { mutate: updateSchedule, isPending: isUpdating } = useUpdatePipelineScheduleMutation();
 
-  const [state, setState] = useState<PipelineSettingsPageScheduleState>(() => ({
+  const createInitialState = (): PipelineScheduleState => ({
     ...PIPELINE_SCHEDULE_DEFAULT_STATE,
-    ...(schedule?.config ? mapPipelineScheduleCronToState(schedule.config.cron) : {}),
+    cron: schedule?.config?.cron || PIPELINE_SCHEDULE_DEFAULT_STATE.cron,
     isEnabled: schedule?.config?.isEnabled ?? PIPELINE_SCHEDULE_DEFAULT_STATE.isEnabled,
     timezone: schedule?.config?.timezone || PIPELINE_SCHEDULE_DEFAULT_STATE.timezone,
-  }));
+  });
 
-  const handleScheduleChange = (partial: Partial<PipelineSettingsPageScheduleState>) => {
+  const [state, setState] = useState<PipelineScheduleState>(createInitialState);
+
+  const handleScheduleChange = (partial: Partial<PipelineScheduleState>) => {
     setState((prev) => ({ ...prev, ...partial }));
+  };
+
+  const handleCancel = () => {
+    setState(createInitialState());
   };
 
   const handleSave = () => {
     const config: Omit<PipelineScheduleConfig, "$typeName" | "overlapPolicy"> = {
-      cron: mapPipelineScheduleStateToCron(state),
+      cron: state.cron.trim(),
       timezone: state.timezone,
       isEnabled: state.isEnabled,
     };
@@ -77,16 +76,15 @@ const PipelineSettingsPageSchedule = () => {
         }),
         {
           onSuccess: () => {
-            showToast({
+            toast({
               header: "Schedule saved",
-              subheader: "Your schedule has been saved successfully.",
               variant: ToastVariant.SUCCESS,
             });
           },
           onError: (error) => {
-            showToast({
+            toast({
               header: "Save failed",
-              subheader: getErrorMessage(error, "Failed to save schedule"),
+              description: getErrorMessage(error, "Failed to save schedule"),
               variant: ToastVariant.ERROR,
             });
           },
@@ -102,16 +100,15 @@ const PipelineSettingsPageSchedule = () => {
       }),
       {
         onSuccess: () => {
-          showToast({
+          toast({
             header: "Schedule created",
-            subheader: "Your pipeline will now run on a schedule.",
             variant: ToastVariant.SUCCESS,
           });
         },
         onError: (error) => {
-          showToast({
+          toast({
             header: "Create failed",
-            subheader: getErrorMessage(error, "Failed to create schedule"),
+            description: getErrorMessage(error, "Failed to create schedule"),
             variant: ToastVariant.ERROR,
           });
         },
@@ -124,20 +121,30 @@ const PipelineSettingsPageSchedule = () => {
   const isDisabledDraft = !schedule && !state.isEnabled;
   const canSave = hasChanges && !isDisabledDraft && summary !== null;
 
+  if (data.pipeline?.executionMode === ExecutionMode.CONTINUOUS) return null;
+
   return (
-    <Accordion header="Schedule" isOpenInitial>
-      <FlexWrapper direction={FlexDirection.COLUMN} gap={FlexGap.MEDIUM} fillWidth>
-        <PipelineScheduleFields state={state} onChange={handleScheduleChange} />
-        <FlexWrapper alignItems={AlignItems.CENTER} justifyContent={JustifyContent.END} fillWidth>
-          <Button
-            label={"Save"}
-            isDisabled={!canSave}
-            isLoading={isCreating || isUpdating}
-            onClick={handleSave}
-          />
-        </FlexWrapper>
-      </FlexWrapper>
-    </Accordion>
+    <PipelineScheduleFields
+      header="Schedule"
+      isOpenInitial={schedule?.config?.isEnabled ?? false}
+      state={state}
+      onChange={handleScheduleChange}
+    >
+      <Flex alignItems={AlignItems.CENTER} justifyContent={JustifyContent.END} gap={8} fillWidth>
+        <Button
+          label="Cancel"
+          variant={ButtonVariant.SECONDARY}
+          isDisabled={!hasChanges || isCreating || isUpdating}
+          onClick={handleCancel}
+        />
+        <Button
+          label="Save"
+          isDisabled={!canSave}
+          isLoading={isCreating || isUpdating}
+          onClick={handleSave}
+        />
+      </Flex>
+    </PipelineScheduleFields>
   );
 };
 

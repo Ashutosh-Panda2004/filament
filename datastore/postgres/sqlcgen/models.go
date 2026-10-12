@@ -53,6 +53,48 @@ func (ns NullConnectorKind) Value() (driver.Value, error) {
 	return string(ns.ConnectorKind), nil
 }
 
+type NotificationType string
+
+const (
+	NotificationTypeWebhook NotificationType = "webhook"
+	NotificationTypeSlack   NotificationType = "slack"
+)
+
+func (e *NotificationType) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = NotificationType(s)
+	case string:
+		*e = NotificationType(s)
+	default:
+		return fmt.Errorf("unsupported scan type for NotificationType: %T", src)
+	}
+	return nil
+}
+
+type NullNotificationType struct {
+	NotificationType NotificationType
+	Valid            bool // Valid is true if NotificationType is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullNotificationType) Scan(value interface{}) error {
+	if value == nil {
+		ns.NotificationType, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.NotificationType.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullNotificationType) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.NotificationType), nil
+}
+
 type Connection struct {
 	ID              string
 	TenantID        string
@@ -71,6 +113,26 @@ type Connection struct {
 	UpdatedAt       pgtype.Timestamptz
 }
 
+type Notifier struct {
+	ID               string
+	TenantID         string
+	PipelineID       string
+	Name             string
+	NotificationType NotificationType
+	IsEnabled        bool
+	Events           []byte
+	Resources        []byte
+	Config           []byte
+	SecretRefs       []byte
+	IsDeleted        bool
+	DeletedAt        pgtype.Timestamptz
+	CreatedByUserID  pgtype.Text
+	UpdatedByUserID  pgtype.Text
+	DeletedByUserID  pgtype.Text
+	CreatedAt        pgtype.Timestamptz
+	UpdatedAt        pgtype.Timestamptz
+}
+
 type Pipeline struct {
 	ID                  string
 	TenantID            string
@@ -85,6 +147,7 @@ type Pipeline struct {
 	DeletedByUserID     pgtype.Text
 	CreatedAt           pgtype.Timestamptz
 	UpdatedAt           pgtype.Timestamptz
+	ExecutionMode       int32
 }
 
 type PipelineResourceCheckpoint struct {
@@ -137,6 +200,12 @@ type ReplicationStream struct {
 	DeletedByUserID              pgtype.Text
 	CreatedAt                    pgtype.Timestamptz
 	UpdatedAt                    pgtype.Timestamptz
+	MembershipRevision           int64
+	CurrentRunID                 pgtype.Text
+	DesiredState                 string
+	DesiredRevision              int64
+	RunSpec                      []byte
+	LastEpoch                    int64
 }
 
 type ReplicationStreamResource struct {
@@ -182,6 +251,7 @@ type Run struct {
 	DeletedByUserID   pgtype.Text
 	CreatedAt         pgtype.Timestamptz
 	UpdatedAt         pgtype.Timestamptz
+	LastCommittedAt   pgtype.Timestamptz
 }
 
 type RunDedupSeen struct {
@@ -257,6 +327,32 @@ type Secret struct {
 	DeletedByUserID pgtype.Text
 	CreatedAt       pgtype.Timestamptz
 	UpdatedAt       pgtype.Timestamptz
+}
+
+type StreamAttempt struct {
+	Token           int64
+	StreamID        string
+	TenantID        string
+	ExecutionID     string
+	DesiredRevision int64
+	RequestTtlUs    int64
+	StartedAt       pgtype.Timestamptz
+	ClaimedAt       pgtype.Timestamptz
+	RunSpec         []byte
+	ExpiresAt       pgtype.Timestamptz
+	EndedAt         pgtype.Timestamptz
+	Termination     pgtype.Text
+	Reason          string
+}
+
+type StreamEpoch struct {
+	StreamID     string
+	TenantID     string
+	Epoch        int64
+	AttemptToken int64
+	Certificate  []byte
+	Positions    []byte
+	CommittedAt  pgtype.Timestamptz
 }
 
 type Tenant struct {

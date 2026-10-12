@@ -3,14 +3,19 @@ package filament
 import (
 	"context"
 	"fmt"
+	"maps"
 )
 
 // ResolveIngestionPlan validates each of the run's ingestion types against
 // both connector specs — the source's narrowed by its connection config — and
 // binds one write policy per resource from that resource's own type,
-// discovering primary keys where the policy requires them.
+// discovering primary keys where the policy requires them. Continuous execution
+// negotiates native stream guarantees and epoch policies through the same entry point.
 func ResolveIngestionPlan(ctx context.Context, src Source, snk Sink, spec RunSpec) (IngestionPlan, error) {
-	replication := ReplicationOf(src, NewConfig(spec.Source.Config))
+	if spec.Options.Execution.Normalize() == ExecutionContinuous {
+		return resolveContinuousIngestionPlan(ctx, src, snk, spec)
+	}
+	replication := ReplicationFor(src.Spec(), NewConfig(spec.Source.Config))
 	validated := map[IngestionType]bool{}
 	validate := func(t IngestionType) error {
 		if validated[t] {
@@ -27,6 +32,10 @@ func ResolveIngestionPlan(ctx context.Context, src Source, snk Sink, spec RunSpe
 	}
 
 	policies := map[string]WritePolicy{}
+	types := maps.Clone(spec.IngestionTypes)
+	if types == nil {
+		types = map[string]IngestionType{}
+	}
 	if len(spec.Resources) == 0 {
 		t := TypeFor(spec.IngestionTypes, "")
 		if err := validate(t); err != nil {
@@ -42,9 +51,22 @@ func ResolveIngestionPlan(ctx context.Context, src Source, snk Sink, spec RunSpe
 	}
 	for _, resource := range spec.Resources {
 		t := TypeFor(spec.IngestionTypes, resource)
+		var keys []string
+		if t.WriteCapability().RequiresPK {
+			var err error
+			keys, err = PrimaryKeyForResource(ctx, src, resource)
+			if err != nil {
+				return IngestionPlan{}, err
+			}
+			t = IngestionForKeys(t, keys)
+			if t.WriteCapability().RequiresPK && len(keys) == 0 {
+				return IngestionPlan{}, fmt.Errorf("%s requested for resource %q but no primary key was discovered", t, resource)
+			}
+		}
 		if err := validate(t); err != nil {
 			return IngestionPlan{}, err
 		}
+		types[resource] = t
 		policy := WritePolicyForIngestion(t)
 		sinkCapability, err := sinkCapabilityForIngestion(snk.Spec(), t)
 		if err != nil {
@@ -52,16 +74,9 @@ func ResolveIngestionPlan(ctx context.Context, src Source, snk Sink, spec RunSpe
 		}
 		bindSinkDurability(&policy, sinkCapability)
 		policy.Resource = resource
-		if policy.Capability.RequiresPK {
-			keys, err := PrimaryKeyForResource(ctx, src, resource)
-			if err != nil {
-				return IngestionPlan{}, err
-			}
-			if len(keys) == 0 {
-				return IngestionPlan{}, fmt.Errorf("%s requested for resource %q but no primary key was discovered", t, resource)
-			}
-			policy.Keys = keys
-		}
+		policy.DestinationResource = spec.WritePolicies[resource].DestinationResource
+		policy.Keys = keys
+
 		version, err := ResolveWriteVersionPolicy(
 			ctx, src, resource, spec.CursorConfigs[resource], SourcePolicyForIngestion(t).Mode, policy.Capability.Mode,
 		)
@@ -73,12 +88,14 @@ func ResolveIngestionPlan(ctx context.Context, src Source, snk Sink, spec RunSpe
 	}
 
 	return IngestionPlan{
-		WritePolicies: policies,
-		RequiresCDC:   IsCDC(spec.IngestionTypes),
+		WritePolicies:  policies,
+		IngestionTypes: types,
+		RequiresCDC:    IsCDC(spec.IngestionTypes),
 	}, nil
 }
 
 func bindSinkDurability(policy *WritePolicy, capability WritePolicyCapability) {
+	policy.Capability.Atomicity = capability.Atomicity
 	policy.Capability.Durability = capability.Durability
 	if policy.Checkpoint != CheckpointNone && capability.Durability == DurabilityAfterCommit {
 		policy.Checkpoint = CheckpointAfterCommit
@@ -111,9 +128,8 @@ func ValidateReplication(replication ReplicationMode, t IngestionType) error {
 	return nil
 }
 
-// ValidateSinkIngestion reports whether the sink spec can serve the write-side
-// policy the ingestion type implies. Any sink may serve append and replace;
-// upsert falls back to the Upsertable capability.
+// ValidateSinkIngestion reports whether the sink spec declares a write policy
+// that can serve the ingestion type. Undeclared policies are rejected.
 func ValidateSinkIngestion(spec SinkSpec, t IngestionType) error {
 	_, err := sinkCapabilityForIngestion(spec, t)
 	return err
@@ -128,18 +144,6 @@ func sinkCapabilityForIngestion(spec SinkSpec, t IngestionType) (WritePolicyCapa
 				return WritePolicyCapability{}, fmt.Errorf("sink %q write policy %q must declare durability as %q or %q", spec.Name, candidate.Mode, DurabilityAfterApply, DurabilityAfterCommit)
 			}
 			return candidate, nil
-		}
-	}
-	switch policy.Capability.Mode {
-	case WriteAppend:
-		if acceptsOperations([]Operation{OpInsert}, policy.Capability.AcceptsOps) {
-			return policy.Capability, nil
-		}
-	case WriteReplace:
-		return policy.Capability, nil
-	case WriteUpsert:
-		if spec.Capabilities.Upsertable {
-			return policy.Capability, nil
 		}
 	}
 	return WritePolicyCapability{}, fmt.Errorf("sink %q does not support write policy %q", spec.Name, policy.Capability.Mode)
@@ -186,4 +190,18 @@ func acceptsOperations(have, want []Operation) bool {
 		}
 	}
 	return true
+}
+
+// IngestionForKeys resolves bounded upsert to append when a resource has no key.
+// CDC and delete policies retain their key requirements.
+func IngestionForKeys(t IngestionType, keys []string) IngestionType {
+	if len(keys) == 0 {
+		switch t.OrDefault() {
+		case IngestionFullUpsert:
+			return IngestionFullAppend
+		case IngestionIncrementalUpsert:
+			return IngestionIncrementalAppend
+		}
+	}
+	return t.OrDefault()
 }

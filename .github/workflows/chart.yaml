@@ -1,10 +1,7 @@
 name: "CD: Helm Chart"
 
 on:
-  push:
-    branches: [main]
-    paths: [charts/filament/Chart.yaml]
-  workflow_dispatch:
+  workflow_call:
 
 permissions:
   attestations: write
@@ -18,7 +15,6 @@ concurrency:
 
 jobs:
   publish:
-    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -32,7 +28,7 @@ jobs:
 
       - uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
         with:
-          version: v0.22.0
+          version: v0.22.1
 
       - name: Read chart metadata
         id: metadata
@@ -41,12 +37,16 @@ jobs:
           app_version=$(yq -r '.appVersion' charts/filament/Chart.yaml)
           owner="${GITHUB_REPOSITORY_OWNER,,}"
 
+          if [[ "v${version}" != "$GITHUB_REF_NAME" || "$version" != "$app_version" ]]; then
+            echo "Chart.yaml is $version for app $app_version but the release is $GITHUB_REF_NAME"
+            exit 1
+          fi
+
           {
             echo "version=$version"
             echo "app_version=$app_version"
             echo "owner=$owner"
             echo "repository=ghcr.io/${owner}/charts/filament"
-            echo "tag=helm-chart-${version}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Build dependencies
@@ -54,6 +54,7 @@ jobs:
           helm repo add bitnami https://charts.bitnami.com/bitnami
           helm repo add nats https://nats-io.github.io/k8s/helm/charts
           helm repo add zitadel https://charts.zitadel.com
+          helm repo add codecentric https://codecentric.github.io/helm-charts
           helm dependency build charts/filament
 
       - name: Package
@@ -110,7 +111,7 @@ jobs:
           digest=$(crane digest "${REPOSITORY}:${VERSION}")
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ steps.metadata.outputs.repository }}
           subject-digest: ${{ steps.digest.outputs.digest }}
@@ -123,11 +124,11 @@ jobs:
           APP_VERSION: ${{ steps.metadata.outputs.app_version }}
           OWNER: ${{ steps.metadata.outputs.owner }}
           REPOSITORY: ${{ steps.metadata.outputs.repository }}
-          TAG: ${{ steps.metadata.outputs.tag }}
           VERSION: ${{ steps.metadata.outputs.version }}
         run: |
-          if gh release view "$TAG" > /dev/null 2>&1; then
-            echo "Release $TAG already exists"
+          tag="helm-chart-${VERSION}"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "Release $tag already exists"
             exit 0
           fi
 
@@ -141,4 +142,4 @@ jobs:
           NOTES
           )
 
-          gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --notes "$notes" --latest=false
+          gh release create "$tag" --target "$GITHUB_SHA" --title "$tag" --notes "$notes" --latest=false

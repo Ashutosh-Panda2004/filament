@@ -76,18 +76,21 @@ func (ConnectorMaturity) EnumDescriptor() ([]byte, []int) {
 
 // ConnectorSpec describes one registered source or sink connector.
 type ConnectorSpec struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	DisplayName   string                 `protobuf:"bytes,2,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
-	Kind          ConnectorKind          `protobuf:"varint,3,opt,name=kind,proto3,enum=ingestion.v1.ConnectorKind" json:"kind,omitempty"`
-	Version       string                 `protobuf:"bytes,4,opt,name=version,proto3" json:"version,omitempty"`
-	Modes         []ReplicationMode      `protobuf:"varint,5,rep,packed,name=modes,proto3,enum=ingestion.v1.ReplicationMode" json:"modes,omitempty"`
-	ConfigSchema  *ConfigSchema          `protobuf:"bytes,6,opt,name=config_schema,json=configSchema,proto3" json:"config_schema,omitempty"`
-	Description   string                 `protobuf:"bytes,7,opt,name=description,proto3" json:"description,omitempty"`
-	DarkLogoUrl   string                 `protobuf:"bytes,8,opt,name=dark_logo_url,json=darkLogoUrl,proto3" json:"dark_logo_url,omitempty"`
-	LightLogoUrl  string                 `protobuf:"bytes,9,opt,name=light_logo_url,json=lightLogoUrl,proto3" json:"light_logo_url,omitempty"`
-	SchemaField   string                 `protobuf:"bytes,10,opt,name=schema_field,json=schemaField,proto3" json:"schema_field,omitempty"`
-	Maturity      ConnectorMaturity      `protobuf:"varint,11,opt,name=maturity,proto3,enum=ingestion.v1.ConnectorMaturity" json:"maturity,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Name         string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	DisplayName  string                 `protobuf:"bytes,2,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	Kind         ConnectorKind          `protobuf:"varint,3,opt,name=kind,proto3,enum=ingestion.v1.ConnectorKind" json:"kind,omitempty"`
+	Version      string                 `protobuf:"bytes,4,opt,name=version,proto3" json:"version,omitempty"`
+	Modes        []ReplicationMode      `protobuf:"varint,5,rep,packed,name=modes,proto3,enum=ingestion.v1.ReplicationMode" json:"modes,omitempty"`
+	ConfigSchema *ConfigSchema          `protobuf:"bytes,6,opt,name=config_schema,json=configSchema,proto3" json:"config_schema,omitempty"`
+	Description  string                 `protobuf:"bytes,7,opt,name=description,proto3" json:"description,omitempty"`
+	DarkLogoUrl  string                 `protobuf:"bytes,8,opt,name=dark_logo_url,json=darkLogoUrl,proto3" json:"dark_logo_url,omitempty"`
+	LightLogoUrl string                 `protobuf:"bytes,9,opt,name=light_logo_url,json=lightLogoUrl,proto3" json:"light_logo_url,omitempty"`
+	SchemaField  string                 `protobuf:"bytes,10,opt,name=schema_field,json=schemaField,proto3" json:"schema_field,omitempty"`
+	Maturity     ConnectorMaturity      `protobuf:"varint,11,opt,name=maturity,proto3,enum=ingestion.v1.ConnectorMaturity" json:"maturity,omitempty"`
+	ApiVersion   string                 `protobuf:"bytes,12,opt,name=api_version,json=apiVersion,proto3" json:"api_version,omitempty"`
+	// Concrete registration selected by a source catalog alias; empty otherwise.
+	AliasTarget   string `protobuf:"bytes,13,opt,name=alias_target,json=aliasTarget,proto3" json:"alias_target,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -197,6 +200,20 @@ func (x *ConnectorSpec) GetMaturity() ConnectorMaturity {
 		return x.Maturity
 	}
 	return ConnectorMaturity_CONNECTOR_MATURITY_UNSPECIFIED
+}
+
+func (x *ConnectorSpec) GetApiVersion() string {
+	if x != nil {
+		return x.ApiVersion
+	}
+	return ""
+}
+
+func (x *ConnectorSpec) GetAliasTarget() string {
+	if x != nil {
+		return x.AliasTarget
+	}
+	return ""
 }
 
 type ListConnectorsRequest struct {
@@ -976,11 +993,13 @@ func (x *ResourceColumn) GetSupportsLookback() bool {
 }
 
 type ResourceColumns struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Resource      string                 `protobuf:"bytes,1,opt,name=resource,proto3" json:"resource,omitempty"`
-	Columns       []*ResourceColumn      `protobuf:"bytes,2,rep,name=columns,proto3" json:"columns,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Resource string                 `protobuf:"bytes,1,opt,name=resource,proto3" json:"resource,omitempty"`
+	Columns  []*ResourceColumn      `protobuf:"bytes,2,rep,name=columns,proto3" json:"columns,omitempty"`
+	// Incremental state is owned by the source; no cursor column is required.
+	ManagedIncremental bool `protobuf:"varint,3,opt,name=managed_incremental,json=managedIncremental,proto3" json:"managed_incremental,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *ResourceColumns) Reset() {
@@ -1025,6 +1044,13 @@ func (x *ResourceColumns) GetColumns() []*ResourceColumn {
 		return x.Columns
 	}
 	return nil
+}
+
+func (x *ResourceColumns) GetManagedIncremental() bool {
+	if x != nil {
+		return x.ManagedIncremental
+	}
+	return false
 }
 
 type GetResourceColumnsResponse struct {
@@ -1075,7 +1101,7 @@ var File_ingestion_v1_connectors_proto protoreflect.FileDescriptor
 
 const file_ingestion_v1_connectors_proto_rawDesc = "" +
 	"\n" +
-	"\x1dingestion/v1/connectors.proto\x12\fingestion.v1\x1a\x1cgoogle/protobuf/struct.proto\x1a\x19ingestion/v1/common.proto\x1a\x1dingestion/v1/pagination.proto\x1a\x1aingestion/v1/sorting.proto\"\xd3\x03\n" +
+	"\x1dingestion/v1/connectors.proto\x12\fingestion.v1\x1a\x1cgoogle/protobuf/struct.proto\x1a\x19ingestion/v1/common.proto\x1a\x1dingestion/v1/pagination.proto\x1a\x1aingestion/v1/sorting.proto\"\x97\x04\n" +
 	"\rConnectorSpec\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12!\n" +
 	"\fdisplay_name\x18\x02 \x01(\tR\vdisplayName\x12/\n" +
@@ -1088,7 +1114,10 @@ const file_ingestion_v1_connectors_proto_rawDesc = "" +
 	"\x0elight_logo_url\x18\t \x01(\tR\flightLogoUrl\x12!\n" +
 	"\fschema_field\x18\n" +
 	" \x01(\tR\vschemaField\x12;\n" +
-	"\bmaturity\x18\v \x01(\x0e2\x1f.ingestion.v1.ConnectorMaturityR\bmaturity\"\xd9\x01\n" +
+	"\bmaturity\x18\v \x01(\x0e2\x1f.ingestion.v1.ConnectorMaturityR\bmaturity\x12\x1f\n" +
+	"\vapi_version\x18\f \x01(\tR\n" +
+	"apiVersion\x12!\n" +
+	"\falias_target\x18\r \x01(\tR\valiasTarget\"\xd9\x01\n" +
 	"\x15ListConnectorsRequest\x12/\n" +
 	"\x04kind\x18\x01 \x01(\x0e2\x1b.ingestion.v1.ConnectorKindR\x04kind\x12?\n" +
 	"\n" +
@@ -1156,10 +1185,11 @@ const file_ingestion_v1_connectors_proto_rawDesc = "" +
 	"\awarning\x18\t \x01(\tR\awarning\x12'\n" +
 	"\x0fis_configurable\x18\n" +
 	" \x01(\bR\x0eisConfigurable\x12+\n" +
-	"\x11supports_lookback\x18\v \x01(\bR\x10supportsLookback\"e\n" +
+	"\x11supports_lookback\x18\v \x01(\bR\x10supportsLookback\"\x96\x01\n" +
 	"\x0fResourceColumns\x12\x1a\n" +
 	"\bresource\x18\x01 \x01(\tR\bresource\x126\n" +
-	"\acolumns\x18\x02 \x03(\v2\x1c.ingestion.v1.ResourceColumnR\acolumns\"Y\n" +
+	"\acolumns\x18\x02 \x03(\v2\x1c.ingestion.v1.ResourceColumnR\acolumns\x12/\n" +
+	"\x13managed_incremental\x18\x03 \x01(\bR\x12managedIncremental\"Y\n" +
 	"\x1aGetResourceColumnsResponse\x12;\n" +
 	"\tresources\x18\x01 \x03(\v2\x1d.ingestion.v1.ResourceColumnsR\tresources*\x91\x01\n" +
 	"\x11ConnectorMaturity\x12\"\n" +

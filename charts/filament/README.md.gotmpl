@@ -9,7 +9,7 @@
 
 ## Introduction
 
-This chart deploys Filament server, control plane, Kubernetes worker dispatch support, and the configuration needed to connect Filament to PostgreSQL and NATS.
+This chart deploys Filament server, control plane, a persistent worker that answers connector calls, Kubernetes worker dispatch support, and the configuration needed to connect Filament to PostgreSQL and NATS.
 
 > [!CAUTION]
 > We strongly recommend running exactly one control-plane replica. Multiple replicas may race while coordinating schedules and runs. Keep `controlPlane.replicas` at `1` and leave `controlPlane.autoscaling.enabled` disabled.
@@ -25,12 +25,12 @@ This chart deploys Filament server, control plane, Kubernetes worker dispatch su
 
 {{ end }}{{ if .Dependencies }}{{ template "chart.requirementsTable" . }}{{ end }}
 
-The vendored PostgreSQL, NATS, and Zitadel charts are disabled by default. See the [Bitnami PostgreSQL chart](https://artifacthub.io/packages/helm/bitnami/postgresql), [NATS chart](https://artifacthub.io/packages/helm/nats/nats), and [Zitadel chart](https://artifacthub.io/packages/helm/zitadel/zitadel) documentation for their full configuration surfaces.
+The vendored PostgreSQL, NATS, Zitadel, and Keycloak charts are disabled by default. See the [Bitnami PostgreSQL chart](https://artifacthub.io/packages/helm/bitnami/postgresql), [NATS chart](https://artifacthub.io/packages/helm/nats/nats), [Zitadel chart](https://artifacthub.io/packages/helm/zitadel/zitadel), and [keycloakx chart](https://artifacthub.io/packages/helm/codecentric/keycloakx) documentation for their full configuration surfaces.
 {{ end }}
 
 ## Runtime configuration
 
-Filament requires a PostgreSQL DSN and a NATS URL. The default PostgreSQL-backed secret provider also requires a base64-encoded encryption key; AWS Secrets Manager uses its own credentials instead. Provide the values through `existingSecret` or through chart values so the chart can create the Secret.
+Filament requires a PostgreSQL DSN and a NATS URL. The default PostgreSQL-backed secret provider also requires a base64-encoded encryption key; AWS and GCP Secret Manager use their own credentials instead. Provide the values through `existingSecret` or through chart values so the chart can create the Secret.
 
 To use an existing Secret:
 
@@ -60,6 +60,19 @@ helm upgrade --install filament \
   --set-string secrets.datastore.encryptionKey="$ENC_KEY" \
   --set-string eventBus.nats.url='nats://filament-nats:4222'
 ```
+
+## Worker access
+
+The persistent worker's NetworkPolicy is enabled by default. Only this release's
+server and control plane in the same namespace can reach `worker.service.port`.
+The policy is ingress-only, so connector operations retain outbound access to
+their databases, brokers, and APIs. It does not select dispatched worker Jobs.
+
+The cluster's network plugin must enforce NetworkPolicy. Other policies can
+allow additional traffic. Configure `worker.networkPolicy.extraIngress` for
+additional callers, or disable this policy when access is managed externally.
+NetworkPolicy does not encrypt the RPC connection; use TLS or service mesh
+encryption to protect resolved connection credentials in transit.
 
 ## Overrides
 
@@ -97,6 +110,16 @@ helm upgrade --install filament \
 |-----|------|---------|-------------|
 {{- range .Values }}
   {{- if hasPrefix "controlPlane." .Key }}
+| {{ .Key }} | {{ .Type }} | {{ if .Default }}{{ .Default }}{{ else }}{{ .AutoDefault }}{{ end }} | {{ if .Description }}{{ .Description }}{{ else }}{{ .AutoDescription }}{{ end }} |
+  {{- end }}
+{{- end }}
+
+## Worker parameters
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+{{- range .Values }}
+  {{- if hasPrefix "worker." .Key }}
 | {{ .Key }} | {{ .Type }} | {{ if .Default }}{{ .Default }}{{ else }}{{ .AutoDefault }}{{ end }} | {{ if .Description }}{{ .Description }}{{ else }}{{ .AutoDescription }}{{ end }} |
   {{- end }}
 {{- end }}
@@ -142,6 +165,10 @@ helm upgrade --install filament \
 {{- end }}
 
 ## Authentication parameters
+
+Provider credentials live in a separate Secret so workers never receive them. External Zitadel uses `auth.zitadel.pat` or `auth.zitadel.existingSecret` containing `AUTH_PAT`; the chart creates `<release>-zitadel-auth` when no existing provider Secret is supplied. Vendored Zitadel keeps its setup-generated PAT Secret.
+
+Earlier chart versions stored `AUTH_PAT` in the runtime Secret; move it to the provider Secret on upgrade. Changes to chart-managed auth Secrets roll the server. After changing an existing auth Secret, restart the server yourself.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -189,6 +216,24 @@ The vendored Zitadel runs its init and setup jobs as post-install hooks so the v
 |-----|------|---------|-------------|
 {{- range .Values }}
   {{- if hasPrefix "zitadel." .Key }}
+| {{ .Key }} | {{ .Type }} | {{ if .Default }}{{ .Default }}{{ else }}{{ .AutoDefault }}{{ end }} | {{ if .Description }}{{ .Description }}{{ else }}{{ .AutoDescription }}{{ end }} |
+  {{- end }}
+{{- end }}
+
+## Vendored Keycloak parameters
+
+Enable `auth.enabled`, set `auth.type: keycloak`, and enable `keycloak.enabled`.
+Set `keycloak.hostname` to the HTTP(S) origin reachable from both the cluster and token clients. Configure `keycloak.ingress.tls` when terminating HTTPS at the ingress.
+
+Keycloak uses the vendored PostgreSQL by default; enable `postgresql.enabled` and set its password, or configure `keycloak.database` for an external database.
+Supply stable `auth.keycloak.clientSecret` and `auth.keycloak.adminPassword` values, or set `keycloak.existingSecret` to a dedicated Secret with `AUTH_CLIENT_SECRET` and `AUTH_ADMIN_PASSWORD`. The chart creates `<release>-keycloak-auth` when no existing Secret is supplied. The server creates the realm and client on boot. `keycloak.adminUser` configures both the vendored admin and the server's admin login.
+
+Changing the bootstrap admin password value does not rotate the password in Keycloak; rotate it there first, then update the Secret.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+{{- range .Values }}
+  {{- if hasPrefix "keycloak." .Key }}
 | {{ .Key }} | {{ .Type }} | {{ if .Default }}{{ .Default }}{{ else }}{{ .AutoDefault }}{{ end }} | {{ if .Description }}{{ .Description }}{{ else }}{{ .AutoDescription }}{{ end }} |
   {{- end }}
 {{- end }}

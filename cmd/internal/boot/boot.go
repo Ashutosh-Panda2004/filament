@@ -4,8 +4,10 @@ package boot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"github.com/galaxy-io/filament"
@@ -14,33 +16,49 @@ import (
 	"github.com/galaxy-io/filament/cmd/internal/otel"
 	"github.com/galaxy-io/filament/cmd/internal/persistence"
 	"github.com/galaxy-io/filament/cmd/internal/secret"
+	"github.com/galaxy-io/filament/datastore/postgres"
 	bus "github.com/galaxy-io/filament/eventbus"
 	"github.com/galaxy-io/filament/eventbus/host"
 	"github.com/galaxy-io/filament/module"
 	"github.com/galaxy-io/filament/registry"
+	"github.com/galaxy-io/filament/worker"
 )
 
 // Deps are the providers every deployed binary resolves from the environment.
+// Sources, Sinks and Worker are set by the binary: only the worker links
+// drivers, so FromEnv cannot load them.
 type Deps struct {
-	Log     filament.Logger
-	Store   filament.DataStore
-	Secrets filament.Secrets
-	Metrics filament.Metrics
-	Tracer  filament.Tracer
+	Sources filament.SourceRegistry
+	Sinks   filament.SinkRegistry
+	// Worker answers connector questions for the API and scheduler.
+	Worker filament.Worker
+	Log    filament.Logger
+	Store  filament.DataStore
+	// StreamStore is the same underlying store exposed through its stream interface.
+	StreamStore filament.ContinuousRunStore
+	Secrets     filament.Secrets
+	Metrics     filament.Metrics
+	Tracer      filament.Tracer
 }
 
-// FromEnv builds the logger, datastore, secrets, and otel providers. The
-// returned close flushes otel and closes the store; call it on the way out.
-// The event bus is deliberately separate (Bus) so binaries can start health
-// listeners before the connect wait.
+// FromEnv builds logger, datastore, secrets, and otel providers. The returned
+// close flushes otel and closes the secrets provider and store; call it on the
+// way out. The event bus is deliberately separate (Bus) so binaries can start
+// health listeners before the connect wait.
 func FromEnv(ctx context.Context) (Deps, func(), error) {
-	lg, err := logger.New()
+	lg, metrics, tracer, flushTelemetry, err := Telemetry(ctx)
 	if err != nil {
 		return Deps{}, nil, err
 	}
 	store, err := persistence.FromEnv(ctx)
 	if err != nil {
+		flushTelemetry()
 		return Deps{}, nil, err
+	}
+	var streamStore filament.ContinuousRunStore
+	if pg, ok := store.(*postgres.Store); ok {
+		pg.ConfigureStreamCodecs(registry.DefaultCodecs)
+		streamStore = pg
 	}
 	closeStore := func() {
 		if c, ok := store.(io.Closer); ok {
@@ -50,20 +68,49 @@ func FromEnv(ctx context.Context) (Deps, func(), error) {
 	secrets, err := secret.FromEnv(ctx, store)
 	if err != nil {
 		closeStore()
+		flushTelemetry()
 		return Deps{}, nil, err
+	}
+	closeSecrets := func() {
+		if c, ok := secrets.(io.Closer); ok {
+			_ = c.Close()
+		}
+	}
+	shutdown := func() {
+		flushTelemetry()
+		closeSecrets()
+		closeStore()
+	}
+	return Deps{Log: lg, Store: store, StreamStore: streamStore, Secrets: secrets, Metrics: metrics, Tracer: tracer}, shutdown, nil
+}
+
+// Telemetry builds the logger and otel providers alone, for a binary that
+// needs neither datastore nor bus. The returned close flushes otel.
+func Telemetry(ctx context.Context) (filament.Logger, filament.Metrics, filament.Tracer, func(), error) {
+	lg, err := logger.New()
+	if err != nil {
+		return nil, nil, nil, nil, err
 	}
 	metrics, tracer, otelShutdown, err := otel.FromEnv(ctx)
 	if err != nil {
-		closeStore()
-		return Deps{}, nil, err
+		return nil, nil, nil, nil, err
 	}
-	shutdown := func() {
+	flush := func() {
 		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = otelShutdown(flushCtx)
-		closeStore()
 	}
-	return Deps{Log: lg, Store: store, Secrets: secrets, Metrics: metrics, Tracer: tracer}, shutdown, nil
+	return lg, metrics, tracer, flush, nil
+}
+
+// RemoteWorker reaches the persistent worker at WORKER_URL, for binaries that
+// link no driver.
+func RemoteWorker() (filament.Worker, error) {
+	url := os.Getenv("WORKER_URL")
+	if url == "" {
+		return nil, errors.New("WORKER_URL is required")
+	}
+	return worker.Remote(url), nil
 }
 
 // Bus connects the event bus. The returned close closes it when closable.
@@ -86,8 +133,9 @@ func Mount(ctx context.Context, d Deps, b bus.Bus, mods ...module.Module) (*host
 		Bus:       b,
 		DataStore: d.Store,
 		Secrets:   d.Secrets,
-		Sources:   registry.DefaultSources,
-		Sinks:     registry.DefaultSinks,
+		Sources:   d.Sources,
+		Sinks:     d.Sinks,
+		Worker:    d.Worker,
 		Log:       d.Log,
 		Metrics:   d.Metrics,
 		Tracer:    d.Tracer,

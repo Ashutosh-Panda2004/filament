@@ -3,12 +3,17 @@ name: "CI: Lint"
 on:
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   changes:
+    # Release Please PRs only bump versions; skipped checks still satisfy the ruleset.
+    if: github.event.pull_request.user.login != 'gx-null[bot]'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -17,10 +22,12 @@ jobs:
       go: ${{ steps.filter.outputs.go }}
       ui: ${{ steps.filter.outputs.ui }}
       chart: ${{ steps.filter.outputs.chart }}
+      migrations: ${{ steps.filter.outputs.migrations }}
+      manifests: ${{ steps.filter.outputs.manifests }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
         with:
           filters: |
@@ -32,8 +39,18 @@ jobs:
               - "justfile"
             ui:
               - "ui/**"
+              - "justfile"
+              - ".github/workflows/lint.yaml"
             chart:
               - "charts/**"
+              - ".github/workflows/lint.yaml"
+            migrations:
+              - "datastore/*/migrations/**"
+            manifests:
+              - "connectors/http/manifests/**"
+              - "connectors/http/.yamlfmt.yaml"
+              - "justfile"
+              - ".github/workflows/lint.yaml"
 
   go:
     needs: changes
@@ -47,16 +64,10 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: "**/go.sum"
 
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          path: ~/.cache/golangci-lint
-          key: golangci-${{ hashFiles('**/go.sum', '.golangci.yaml') }}-${{ github.run_id }}
-          restore-keys: |
-            golangci-${{ hashFiles('**/go.sum', '.golangci.yaml') }}-
-            golangci-
-
-      - name: Setup
-        run: curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v2.12.2/install.sh | sh -s -- -b "$(go env GOPATH)/bin" v2.12.2
+          version: v2.13.2
+          install-only: true
 
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
 
@@ -73,9 +84,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
-          version: 10
+          package_json_file: ui/package.json
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
@@ -85,17 +96,8 @@ jobs:
 
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
 
-      - name: Install
-        run: cd ui && pnpm install
-
-      - name: Lint
-        run: just ui-lint check
-
-      - name: Format
-        run: just ui-format check
-
-      - name: Build
-        run: just ui-dist
+      - name: Check
+        run: just ui-check
 
   chart:
     needs: changes
@@ -113,13 +115,14 @@ jobs:
 
       - uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
         with:
-          version: v0.22.0
+          version: v0.22.1
 
       - name: Dependencies
         run: |
           helm repo add bitnami https://charts.bitnami.com/bitnami
           helm repo add nats https://nats-io.github.io/k8s/helm/charts
           helm repo add zitadel https://charts.zitadel.com
+          helm repo add codecentric https://codecentric.github.io/helm-charts
           helm dependency build charts/filament
 
       - name: Lint
@@ -131,6 +134,11 @@ jobs:
           helm template filament charts/filament --set existingSecret=byo > /dev/null
           helm template filament charts/filament --set controlPlane.autoscaling.enabled=true --set server.autoscaling.enabled=true > /dev/null
           helm template filament charts/filament --set server.ingress.enabled=true --set "server.ingress.hosts[0]=filament.example.com" > /dev/null
+          helm template filament charts/filament --set auth.enabled=true --set auth.type=keycloak --set auth.keycloak.issuer=https://id.example.com/realms/filament --set auth.keycloak.clientSecret=s > /dev/null
+          helm template filament charts/filament --set auth.enabled=true --set auth.type=keycloak --set keycloak.enabled=true --set keycloak.hostname=https://id.example.com/ --set auth.keycloak.clientSecret=s --set auth.keycloak.adminPassword=a --set postgresql.enabled=true --set postgresql.auth.password=p > /dev/null
+          helm template filament charts/filament --set existingSecret=runtime-byo --set keycloak.existingSecret=keycloak-byo --set auth.enabled=true --set auth.type=keycloak --set keycloak.enabled=true --set keycloak.hostname=https://id.example.com --set postgresql.enabled=true > /dev/null
+          helm template filament charts/filament --set auth.enabled=true --set auth.zitadel.issuer=https://id.example.com --set auth.zitadel.pat=p > /dev/null
+          helm template filament charts/filament --set existingSecret=runtime-byo --set auth.enabled=true --set auth.zitadel.issuer=https://id.example.com --set auth.zitadel.existingSecret=zitadel-byo > /dev/null
 
       - name: Package
         run: helm package charts/filament --destination /tmp
@@ -149,8 +157,65 @@ jobs:
             crane digest "ghcr.io/${owner}/filament/${image}:${app_version}"
           done
 
+  migrations:
+    needs: changes
+    if: needs.changes.outputs.migrations == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
+
+      - name: Validate
+        run: |
+          version=$(go list -m -f '{{.Version}}' github.com/pressly/goose/v3)
+          for dir in datastore/*/migrations; do
+            go run "github.com/pressly/goose/v3/cmd/goose@${version}" -dir "$dir" validate -v
+          done
+
+      - name: Versions
+        run: |
+          for dir in datastore/*/migrations; do
+            versions=$(ls "$dir" | sed -E 's/^([0-9]+)_.*\.sql$/\1/' | sort -n)
+            if ! diff <(echo "$versions") <(seq -f '%05g' 1 "$(echo "$versions" | wc -l)"); then
+              echo "$dir: versions must be unique and contiguous from 00001"
+              exit 1
+            fi
+          done
+
+      - name: Append-only
+        run: |
+          changed=$(git diff --name-only --diff-filter=MDR "origin/${GITHUB_BASE_REF}...HEAD" -- 'datastore/*/migrations/')
+          if [[ -n "$changed" ]]; then
+            echo "shipped migrations are append-only; changed:"
+            echo "$changed"
+            exit 1
+          fi
+
+  manifests:
+    needs: changes
+    if: needs.changes.outputs.manifests == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
+
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+
+      - name: Lint HTTP manifests
+        run: just manifest-lint
+
   lint-ok:
-    needs: [go, ui, chart]
+    needs: [changes, go, ui, chart, migrations, manifests]
     if: always()
     runs-on: ubuntu-latest
     steps:
