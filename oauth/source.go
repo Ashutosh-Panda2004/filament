@@ -104,6 +104,20 @@ func NewSource(config Config, store Store) (*Source, error) {
 // Token returns only committed token state. Store implementations must not
 // log the token or any callback arguments.
 func (s *Source) Token(ctx context.Context) (Token, error) {
+	return s.token(ctx, "")
+}
+
+// Refresh replaces an access token rejected by the API. If another caller has
+// already saved a fresh replacement, it reuses that token instead of rotating
+// again. The connector is responsible for bounding API request replays.
+func (s *Source) Refresh(ctx context.Context, rejected string) (Token, error) {
+	if rejected == "" {
+		return Token{}, errors.New("oauth: rejected access token is required")
+	}
+	return s.token(ctx, rejected)
+}
+
+func (s *Source) token(ctx context.Context, rejected string) (Token, error) {
 	select {
 	case s.lock <- struct{}{}:
 		defer func() { <-s.lock }()
@@ -116,7 +130,9 @@ func (s *Source) Token(ctx context.Context) (Token, error) {
 	// A retained exchange may have expired while persistence was unavailable.
 	// Commit its refresh token first, then acquire a usable access token.
 	for range 2 {
-		token, err := s.store.Update(ctx, s.refresh)
+		token, err := s.store.Update(ctx, func(ctx context.Context, current Token) (Token, error) {
+			return s.refresh(ctx, current, rejected)
+		})
 		if err != nil {
 			return Token{}, err
 		}
@@ -128,7 +144,7 @@ func (s *Source) Token(ctx context.Context) (Token, error) {
 	return Token{}, errors.New("oauth: token expired before it could be used")
 }
 
-func (s *Source) refresh(ctx context.Context, current Token) (Token, error) {
+func (s *Source) refresh(ctx context.Context, current Token, rejected string) (Token, error) {
 	if err := ctx.Err(); err != nil {
 		return Token{}, err
 	}
@@ -140,7 +156,7 @@ func (s *Source) refresh(ctx context.Context, current Token) (Token, error) {
 		// credential. Never overwrite its newer state with ours.
 		s.pending = nil
 	}
-	if current.AccessToken != "" && s.now().Add(30*time.Second).Before(current.ExpiresAt) {
+	if current.AccessToken != "" && current.AccessToken != rejected && s.now().Add(30*time.Second).Before(current.ExpiresAt) {
 		return current, nil
 	}
 	if s.config.GrantType == RefreshToken && current.RefreshToken == "" {

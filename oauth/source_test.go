@@ -252,6 +252,29 @@ func TestStoreContextBoundsExchange(t *testing.T) {
 	}
 }
 
+func TestRefreshReusesAnotherCallersReplacement(t *testing.T) {
+	var calls atomic.Int32
+	api := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		fmt.Fprint(w, `{"access_token":"replacement","refresh_token":"rotated","expires_in":3600}`)
+	}))
+	defer api.Close()
+	store := NewMemoryStore(Token{AccessToken: "rejected", RefreshToken: "initial", ExpiresAt: time.Now().Add(time.Hour)})
+	first, second := mustSource(t, refreshConfig(api), store), mustSource(t, refreshConfig(api), store)
+	for _, source := range []*Source{first, second} {
+		token, err := source.Refresh(t.Context(), "rejected")
+		if err != nil || token.AccessToken != "replacement" {
+			t.Fatalf("refresh failed: %v", err)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatal("a stale rejection rotated the new authorization again")
+	}
+	if _, err := first.Refresh(t.Context(), ""); err == nil {
+		t.Fatal("unconditional refresh was accepted")
+	}
+}
+
 func TestExpiredPendingTokenIsSavedBeforeNextExchange(t *testing.T) {
 	var calls atomic.Int32
 	api := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
