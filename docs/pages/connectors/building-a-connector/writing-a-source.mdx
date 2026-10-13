@@ -192,8 +192,14 @@ token.SetAuthHeader(req)
 
 A future authorization-code callback can pass the issued tokens to the same
 `store.Set` method. A driver can depend on the small `oauth.TokenSource`
-interface. The connection API and worker protocol do not yet provision or bind
-OAuth credential IDs.
+interface. The connection API and worker protocol do not provision standalone
+OAuth credential IDs. A driver can implement `oauth/secrets.Configurable` to
+identify its saved refresh-token field and an authorization-settings fingerprint.
+The runner binds that managed secret through `oauth/secrets.Bind` before source
+configuration. Binding performs no secret reads or token exchanges. The first
+refresh saves token state under the same encrypted reference. Connection
+replacement and deletion use the existing secret lifecycle. Unsaved connection
+validation must not exchange rotating tokens.
 
 Token state is encrypted in the existing secrets table. Refreshes and explicit
 replacements serialize under a Postgres row lock or SQLite writer transaction.

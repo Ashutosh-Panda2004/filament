@@ -26,6 +26,7 @@ type Store struct {
 	updater  updater
 	tenant   filament.TenantID
 	ref      string
+	binding  string
 }
 
 var _ oauth.Store = (*Store)(nil)
@@ -50,11 +51,11 @@ func (s *Store) Set(ctx context.Context, token oauth.Token) error {
 	if token.AccessToken == "" && token.RefreshToken == "" {
 		return errors.New("oauth: a token is required")
 	}
-	value, err := json.Marshal(token) // #nosec G117 -- token payload goes only to the encrypted secret provider.
+	secret, err := s.encode(filament.Secret{Tenant: s.tenant}, token)
 	if err != nil {
 		return errors.New("oauth: cannot encode token")
 	}
-	return s.provider.Write(ctx, s.ref, filament.Secret{Tenant: s.tenant, Value: value})
+	return s.provider.Write(ctx, s.ref, secret)
 }
 
 // Delete removes local credentials. Provider-side revocation is separate.
@@ -66,9 +67,9 @@ func (s *Store) Update(ctx context.Context, fn func(context.Context, oauth.Token
 	ctx, cancel := context.WithTimeout(ctx, 35*time.Second)
 	defer cancel()
 	secret, err := s.updater.UpdateSecret(ctx, s.tenant, s.ref, func(secret filament.Secret) (filament.Secret, error) {
-		var current oauth.Token
-		if err := json.Unmarshal(secret.Value, &current); err != nil {
-			return filament.Secret{}, errors.New("oauth: cannot decode stored token")
+		current, err := s.decode(secret)
+		if err != nil {
+			return filament.Secret{}, err
 		}
 		next, err := fn(ctx, current)
 		if err != nil {
@@ -77,19 +78,57 @@ func (s *Store) Update(ctx context.Context, fn func(context.Context, oauth.Token
 		if next == current {
 			return secret, nil
 		}
-		value, err := json.Marshal(next) // #nosec G117 -- token payload goes only to the encrypted secret provider.
-		if err != nil {
-			return filament.Secret{}, errors.New("oauth: cannot encode token")
-		}
-		secret.Value = value
-		return secret, nil
+		return s.encode(secret, next)
 	})
 	if err != nil {
 		return oauth.Token{}, err
+	}
+	return s.decode(secret)
+}
+
+type boundToken struct {
+	Token   oauth.Token `json:"token"`
+	Binding string      `json:"binding"`
+}
+
+func (s *Store) decode(secret filament.Secret) (oauth.Token, error) {
+	if s.binding != "" {
+		switch secret.Meta["oauth_format"] {
+		case "":
+			return oauth.Token{RefreshToken: string(secret.Value)}, nil
+		case "v1":
+			var state boundToken
+			if err := json.Unmarshal(secret.Value, &state); err != nil {
+				return oauth.Token{}, errors.New("oauth: cannot decode stored token")
+			}
+			if state.Binding != s.binding {
+				return oauth.Token{}, errors.New("oauth: authorization settings changed; supply a fresh refresh token")
+			}
+			return state.Token, nil
+		default:
+			return oauth.Token{}, errors.New("oauth: unsupported stored token format")
+		}
 	}
 	var token oauth.Token
 	if err := json.Unmarshal(secret.Value, &token); err != nil {
 		return oauth.Token{}, errors.New("oauth: cannot decode stored token")
 	}
 	return token, nil
+}
+
+func (s *Store) encode(secret filament.Secret, token oauth.Token) (filament.Secret, error) {
+	var value any = token
+	if s.binding != "" {
+		value = boundToken{Token: token, Binding: s.binding}
+		if secret.Meta == nil {
+			secret.Meta = map[string]string{}
+		}
+		secret.Meta["oauth_format"] = "v1"
+	}
+	data, err := json.Marshal(value) // #nosec G117 -- token payload goes only to the encrypted secret provider.
+	if err != nil {
+		return filament.Secret{}, errors.New("oauth: cannot encode token")
+	}
+	secret.Value = data
+	return secret, nil
 }
