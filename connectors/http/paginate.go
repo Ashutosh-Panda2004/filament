@@ -133,8 +133,7 @@ func (c *Connector) paginate(
 
 		// Decode body for paginators that consume response paths (cursor, next_url).
 		// Root-array bodies decode as nil — ok, those pagers don't use body.
-		var bodyMap map[string]any
-		_ = json.Unmarshal(raw, &bodyMap)
+		bodyMap := decodePaginatorBody(raw)
 
 		state, err = pag.Next(resp, bodyMap, len(records))
 		if err != nil {
@@ -145,6 +144,23 @@ func (c *Connector) paginate(
 			return totalRecords, pageCount, nil
 		}
 	}
+}
+
+// decodePaginatorBody decodes a response body into the map view the
+// paginators consume. Numbers are decoded with UseNumber so they stay
+// json.Number and keep their exact digits: plain json.Unmarshal turns
+// every number into a float64, which silently rounds cursors above 2^53
+// (9007199254740993 comes back as 9007199254740992) before the cursor is
+// sent on the next request or checkpointed. The records decode in
+// response/extract.go already uses UseNumber for the same reason.
+// Bodies that are not JSON objects (root arrays, invalid JSON) decode
+// to nil, exactly as they did with json.Unmarshal.
+func decodePaginatorBody(raw []byte) map[string]any {
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.UseNumber()
+	var body map[string]any
+	_ = dec.Decode(&body)
+	return body
 }
 
 func (c *Connector) initialPaginationState(

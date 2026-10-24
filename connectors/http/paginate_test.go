@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -357,5 +358,70 @@ func TestHTTPLinkHeaderWalksRepeatedLinkFields(t *testing.T) {
 	}
 	if strings.Join(ids, ",") != "1,2" {
 		t.Fatalf("ids=%v, want [1 2] — the rel=\"next\" field after the first was not followed", ids)
+	}
+}
+
+// TestSourceCursorPaginationPreservesLargeNumericCursor reproduces #586:
+// a numeric next_cursor above 2^53 must be sent back to the API exactly as
+// received. Decoded as float64 it rounds (9007199254740993 becomes
+// 9007199254740992) and the walk silently resumes from the wrong record.
+func TestSourceCursorPaginationPreservesLargeNumericCursor(t *testing.T) {
+	ctx := context.Background()
+	var cursors []string
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cursor := r.URL.Query().Get("start_cursor")
+		cursors = append(cursors, cursor)
+		w.Header().Set("Content-Type", "application/json")
+		if cursor == "" {
+			fmt.Fprint(w, `{"items":[{"id":"a"}],"next_cursor":9007199254740993,"has_more":true}`)
+			return
+		}
+		fmt.Fprint(w, `{"items":[{"id":"b"}],"has_more":false}`)
+	}))
+	defer api.Close()
+
+	src := New()
+	if err := src.Configure(ctx, filament.NewConfig(map[string]any{
+		"manifest_path": writeTestManifest(t, api.URL),
+	})); err != nil {
+		t.Fatalf("configure: %v", err)
+	}
+	defer src.Teardown(ctx)
+
+	var sink collectSink
+	if err := src.Extract(ctx, &sink, filament.ExtractOpts{Resources: []string{"items"}, Parallelism: 1}); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if len(cursors) != 2 {
+		t.Fatalf("requests = %d, want 2 (%v)", len(cursors), cursors)
+	}
+	if cursors[1] != "9007199254740993" {
+		t.Fatalf("second request start_cursor = %q, want %q", cursors[1], "9007199254740993")
+	}
+	if len(sink.records) != 2 {
+		t.Fatalf("records = %d, want 2", len(sink.records))
+	}
+}
+
+func TestDecodePaginatorBodyPreservesExactNumbers(t *testing.T) {
+	body := decodePaginatorBody([]byte(`{"next_cursor":9007199254740993,"page":2,"label":"x","has_more":true}`))
+	num, ok := body["next_cursor"].(json.Number)
+	if !ok {
+		t.Fatalf("next_cursor type = %T, want json.Number", body["next_cursor"])
+	}
+	if num.String() != "9007199254740993" {
+		t.Fatalf("next_cursor = %s, want 9007199254740993", num.String())
+	}
+	if got := body["label"]; got != "x" {
+		t.Fatalf("label = %v, want x", got)
+	}
+	if got := body["has_more"]; got != true {
+		t.Fatalf("has_more = %v, want true", got)
+	}
+	if got := decodePaginatorBody([]byte(`[{"id":1}]`)); got != nil {
+		t.Fatalf("root array body = %v, want nil", got)
+	}
+	if got := decodePaginatorBody([]byte(`not json`)); got != nil {
+		t.Fatalf("invalid body = %v, want nil", got)
 	}
 }
